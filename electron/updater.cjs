@@ -13,18 +13,25 @@
 
 const { app, ipcMain } = require("electron");
 const { autoUpdater } = require("electron-updater");
+const { CancellationToken } = require("builder-util-runtime");   // electron-updater's own dependency
 const fs = require("node:fs");
 const path = require("node:path");
 
 const FIRST_CHECK_DELAY_MS = 10 * 1000;
 const CHECK_EVERY_MS = 4 * 60 * 60 * 1000;      // 4 hours
 const LATER_SNOOZE_MS = 24 * 60 * 60 * 1000;    // "Later" hides that version for a day
+const STALL_MS = 2 * 60 * 1000;                  // no download progress for this long = stalled
+const STALL_POLL_MS = 15 * 1000;
 const APP_ORIGIN = "app://practice-manager";
 
 let getWindow = () => null;
 let state = { state: "idle", currentVersion: app.getVersion() };
 let userInitiated = false;   // a manual check / download — errors are shown, not swallowed
 let busy = false;
+// The download in flight, if any: its cancellation token and when it last made
+// progress. Set from the Download click until that download settles — while
+// set, no second download or check starts.
+let download = null;
 
 // ---- small persisted prefs + log, both in the user-data folder ----------------
 const prefsFile = () => path.join(app.getPath("userData"), "update-prefs.json");
@@ -73,7 +80,7 @@ function isOffline(err) {
 }
 
 async function check(manual) {
-  if (busy || state.state === "downloading" || state.state === "downloaded") return state;
+  if (busy || download || state.state === "downloading" || state.state === "downloaded") return state;
   userInitiated = !!manual;
   busy = true;
   try {
@@ -113,14 +120,19 @@ function wire() {
     send({ state: "not-available", version: info && info.version, message: userInitiated ? "You're on the latest version." : "" });
   });
   autoUpdater.on("download-progress", (p) => {
+    // A late event from a download already cancelled as stalled must not flip
+    // the card back to "Downloading".
+    if (!download || download.token.cancelled) return;
+    download.lastProgressAt = Date.now();
     send({ state: "downloading", percent: Math.round(p.percent || 0), transferred: p.transferred, total: p.total, bytesPerSecond: p.bytesPerSecond });
   });
   autoUpdater.on("update-downloaded", (info) => {
     log("update downloaded", info.version);
     send({ state: "downloaded", version: info.version, percent: 100 });
   });
+  // electron-updater writes every 'error' event to autoUpdater.logger itself,
+  // so it is not logged again here.
   autoUpdater.on("error", (err) => {
-    log("error", err && (err.stack || err.message || err));
     const wasDownloading = state.state === "downloading";
     // A repository with no releases yet simply means there is nothing newer.
     if (!wasDownloading && /No published versions/i.test(String(err && err.message))) {
@@ -152,10 +164,27 @@ function registerIpc() {
   handle("updater:get-state", () => state);
   handle("updater:check", () => check(true));
   handle("updater:download", async () => {
+    if (download) return state;   // one download at a time (incl. one still being cancelled)
     if (state.state !== "available" && !(state.state === "error" && state.retry === "download")) return state;
     userInitiated = true;
+    const run = download = { token: new CancellationToken(), lastProgressAt: Date.now() };
     send({ state: "downloading", percent: 0, message: "" });
-    try { await autoUpdater.downloadUpdate(); } catch { /* reported by 'error' */ }
+    // Stall watchdog: cancelling makes downloadUpdate() reject with a
+    // CancellationError, which electron-updater does not report as 'error'
+    // and which clears its in-progress download, so "Try again" starts afresh.
+    const watchdog = setInterval(() => {
+      if (run.token.cancelled || Date.now() - run.lastProgressAt < STALL_MS) return;
+      log("warn", `download stalled — no progress for ${STALL_MS / 1000}s; cancelling`);
+      run.token.cancel();
+      send({ state: "error", message: "The update download stopped making progress. Check your connection and try again.", retry: "download" });
+    }, STALL_POLL_MS);
+    try {
+      await autoUpdater.downloadUpdate(run.token);
+    } catch { /* reported by 'error', or cancelled as stalled */ }
+    finally {
+      clearInterval(watchdog);
+      download = null;
+    }
     return state;
   });
   handle("updater:later", () => {

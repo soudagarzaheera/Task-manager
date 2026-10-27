@@ -1,7 +1,7 @@
 {
   "name": "task-manager",
   "productName": "Practice Manager",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Task Manager and Attendance System",
   "author": "Zaheera",
   "homepage": "https://github.com/soudagarzaheera/Task-manager",
@@ -41,6 +41,7 @@
       "dist/**/*",
       "electron/**/*",
       "build/icon.png",
+      "build/icon.ico",
       "package.json"
     ],
     "electronFuses": {
@@ -60,7 +61,7 @@
           ]
         }
       ],
-      "icon": "build/icon.png"
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": true,
@@ -69,7 +70,10 @@
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
       "shortcutName": "Practice Manager",
-      "artifactName": "Practice-Manager-Setup-${version}.${ext}"
+      "artifactName": "Practice-Manager-Setup-${version}.${ext}",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico"
     },
     "publish": [
       {

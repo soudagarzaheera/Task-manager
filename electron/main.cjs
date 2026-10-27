@@ -73,7 +73,8 @@ if (!app.requestSingleInstanceLock()) {
       minHeight: 600,
       show: false,
       backgroundColor: "#B1CB98",
-      icon: path.join(__dirname, "..", "build", "icon.png"),
+      // Fyn icon: .ico on Windows (taskbar / title bar, all sizes), .png elsewhere
+      icon: path.join(__dirname, "..", "build", process.platform === "win32" ? "icon.ico" : "icon.png"),
       webPreferences: {
         preload: path.join(__dirname, "preload.cjs"),
         contextIsolation: true,

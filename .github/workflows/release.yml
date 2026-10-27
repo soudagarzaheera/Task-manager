@@ -2,6 +2,13 @@
 # metadata (latest.yml + .blockmap), to a GitHub Release. Installed apps pick
 # the release up from there.
 #
+# Draft first, publish last: one draft release is created for the tag before
+# electron-builder runs, so its parallel uploads all land in that draft (left
+# to itself, electron-builder raced and created two v1.0.0 releases, splitting
+# latest.yml from the tag the updater downloads by). The draft is published
+# only after its three files are checked against the build; if any step
+# fails, it stays a draft and installed apps never see it.
+#
 # Runs only on purpose:
 #   * pushing a version tag, e.g.  git tag v1.0.1 && git push origin v1.0.1
 #   * or Actions -> "Release desktop app" -> Run workflow, naming an existing tag
@@ -84,7 +91,29 @@ jobs:
           { echo "## What's new in $RELEASE_TAG"; echo; git log --no-merges --pretty='- %s' "$RANGE"; } > build/release-notes.md
           cat build/release-notes.md
 
-      - name: Build and publish installer + update metadata
+      - name: Create one draft release for the tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Every release using this tag, drafts included (drafts are listed only with a token).
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | \"\(.id) \(.draft)\"" > "$RUNNER_TEMP/existing.txt"
+          COUNT="$(grep -c . "$RUNNER_TEMP/existing.txt" || true)"
+          if [ "$COUNT" -gt 1 ]; then
+            echo "::error::$COUNT releases already use $RELEASE_TAG — sort them out on GitHub first."; exit 1
+          fi
+          if grep -q ' false$' "$RUNNER_TEMP/existing.txt"; then
+            echo "::error::$RELEASE_TAG is already published. Release a new version instead."; exit 1
+          fi
+          if [ "$COUNT" -eq 1 ]; then
+            echo "Reusing draft $(cut -d' ' -f1 "$RUNNER_TEMP/existing.txt") left by an earlier run of $RELEASE_TAG."
+          else
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+              --title "${RELEASE_TAG#v}" --notes-file build/release-notes.md
+          fi
+
+      - name: Build installer + update metadata and upload them to the draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
@@ -92,7 +121,84 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: npm run release:win
 
+      - name: Verify the draft against the build
+        id: verify
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node - <<'EOF'
+          const fs = require("node:fs"), crypto = require("node:crypto"), yaml = require("js-yaml");
+          const { GH_TOKEN, GITHUB_REPOSITORY: repo, RELEASE_TAG: tag, GITHUB_OUTPUT } = process.env;
+          const version = tag.slice(1), exe = `Practice-Manager-Setup-${version}.exe`;
+          const expected = [exe, `${exe}.blockmap`, "latest.yml"];
+          const fail = (m) => { console.log(`::error::${m}`); process.exit(1); };
+          const api = (path, accept = "application/vnd.github+json") =>
+            fetch(`https://api.github.com/${path}`, { headers: { Authorization: `Bearer ${GH_TOKEN}`, Accept: accept } })
+              .then((r) => (r.ok ? r : fail(`GitHub API ${path}: HTTP ${r.status}`)));
+          (async () => {
+            let releases = [];
+            for (let page = 1; ; page++) {
+              const batch = await (await api(`repos/${repo}/releases?per_page=100&page=${page}`)).json();
+              releases = releases.concat(batch.filter((r) => r.tag_name === tag));
+              if (batch.length < 100) break;
+            }
+            if (releases.length !== 1) fail(`expected exactly one release for ${tag}, found ${releases.length}`);
+            const rel = releases[0];
+            if (!rel.draft) fail(`release ${rel.id} for ${tag} is not a draft`);
+
+            const names = rel.assets.map((a) => a.name).sort();
+            if (JSON.stringify(names) !== JSON.stringify([...expected].sort()))
+              fail(`draft assets are [${names.join(", ")}], expected [${expected.join(", ")}]`);
+            for (const a of rel.assets) {
+              const local = `release/${a.name}`;
+              if (!fs.existsSync(local)) fail(`${local} was not built`);
+              if (a.state !== "uploaded") fail(`${a.name} is "${a.state}", not uploaded`);
+              if (a.size !== fs.statSync(local).size) fail(`${a.name}: uploaded ${a.size} bytes, built ${fs.statSync(local).size}`);
+            }
+
+            const localYml = fs.readFileSync("release/latest.yml", "utf8");
+            const ymlAsset = rel.assets.find((a) => a.name === "latest.yml");
+            const uploadedYml = await (await api(`repos/${repo}/releases/assets/${ymlAsset.id}`, "application/octet-stream")).text();
+            if (uploadedYml !== localYml) fail("uploaded latest.yml differs from the built one");
+            const info = yaml.load(localYml);
+            const file = (info.files || [])[0] || {};
+            const sha512 = crypto.createHash("sha512").update(fs.readFileSync(`release/${exe}`)).digest("base64");
+            if (info.version !== version) fail(`latest.yml version is ${info.version}, expected ${version}`);
+            if (info.path !== exe || file.url !== exe) fail(`latest.yml points at ${info.path} / ${file.url}, expected ${exe}`);
+            if (info.sha512 !== sha512 || file.sha512 !== sha512) fail("latest.yml sha512 does not match the built installer");
+            if (file.size !== fs.statSync(`release/${exe}`).size) fail("latest.yml size does not match the built installer");
+
+            console.log(`Draft ${rel.id} verified: ${expected.join(", ")} for ${version}.`);
+            fs.appendFileSync(GITHUB_OUTPUT, `release_id=${rel.id}\n`);
+          })().catch((e) => fail(e.stack || String(e)));
+          EOF
+
+      - name: Publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.verify.outputs.release_id }}
+        run: |
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false -f make_latest=true --jq '.html_url'
+
+      - name: Check installed apps can reach it
+        shell: bash
+        run: |
+          # The updater asks github.com for the latest tag, then downloads by that tag.
+          BASE="https://github.com/$GITHUB_REPOSITORY/releases"
+          for attempt in 1 2 3 4 5 6; do
+            LATEST="$(curl -fsSL -H 'Accept: application/json' "$BASE/latest" | node -p 'JSON.parse(require("fs").readFileSync(0)).tag_name' 2>/dev/null || true)"
+            if [ "$LATEST" = "$RELEASE_TAG" ] && curl -fsSIL -o /dev/null "$BASE/download/$RELEASE_TAG/latest.yml"; then
+              echo "$RELEASE_TAG is the latest release and its latest.yml downloads."; exit 0
+            fi
+            echo "Not visible yet (latest: '${LATEST:-?}'), retrying in 10s…"; sleep 10
+          done
+          echo "::error::$RELEASE_TAG was published but github.com does not serve it as the latest release with latest.yml — check the Releases page."
+          exit 1
+
       - name: Keep the build output
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: practice-manager-${{ env.RELEASE_TAG }}
