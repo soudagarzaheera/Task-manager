@@ -50,6 +50,36 @@ const HIDE_ERROR_DETAILS = (Deno.env.get("HIDE_ERROR_DETAILS") || "").toLowerCas
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// employee_salary_history.monthly_ctc is NUMERIC(12,2).
+const MAX_CTC = 9999999999.99;
+
+// Bulk import (generatePassword: true): a strong, unique password made here,
+// returned once to the calling partner and never stored or logged. Every
+// character class is present so any Auth password policy is met.
+const PW_SETS = ["ABCDEFGHJKLMNPQRSTUVWXYZ", "abcdefghijkmnpqrstuvwxyz", "23456789", "!@#$%*?-_+="];
+function randomIndex(n: number): number {
+  // Rejection sampling — no modulo bias.
+  const limit = Math.floor(0x100000000 / n) * n;
+  const buf = new Uint32Array(1);
+  do { crypto.getRandomValues(buf); } while (buf[0] >= limit);
+  return buf[0] % n;
+}
+export function generatePassword(length = 16): string {
+  const all = PW_SETS.join("");
+  const chars = PW_SETS.map((s) => s[randomIndex(s.length)]);
+  while (chars.length < length) chars.push(all[randomIndex(all.length)]);
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = randomIndex(i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join("");
+}
+
+function validDate(s: string): boolean {
+  if (!DATE_RE.test(s)) return false;
+  const d = new Date(s + "T00:00:00Z");
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}
 
 type BackendError = { message?: string; code?: string; details?: string; hint?: string };
 type Json = (body: unknown, status?: number) => Response;
@@ -140,10 +170,16 @@ async function handle(req: Request, json: Json): Promise<Response> {
 
   // Caller is a verified, active partner from here on — failures may carry
   // the backend detail (unless HIDE_ERROR_DETAILS is set).
-  const fail = (status: number, error: string, cause?: unknown) => {
+  // `reason` is a stable machine code (e.g. "duplicate_code") the bulk
+  // import uses to tell a duplicate from a real failure; older callers
+  // ignore it.
+  const fail = (status: number, error: string, cause?: unknown, reason?: string) => {
     const detail = describe(cause);
     if (cause) console.error(`create-employee: ${error}`, detail);
-    return json(HIDE_ERROR_DETAILS || !detail ? { error } : { error, detail }, status);
+    const out: Record<string, unknown> = { error };
+    if (detail && !HIDE_ERROR_DETAILS) out.detail = detail;
+    if (reason) out.reason = reason;
+    return json(out, status);
   };
 
   const orgId = callerProfile.organization_id as string;
@@ -180,31 +216,49 @@ async function handle(req: Request, json: Json): Promise<Response> {
 
   const fullName = String(body.fullName ?? "").trim();
   const email = String(body.email ?? "").trim().toLowerCase();
-  const password = String(body.password ?? "");
+  // Bulk import asks for a server-made password instead of sending one.
+  const generated = body.generatePassword === true;
+  const password = generated ? generatePassword() : String(body.password ?? "");
   const employeeCode = String(body.employeeCode ?? "").trim();
   const role = String(body.role ?? "");
   const reportsTo = body.reportsTo ? String(body.reportsTo) : null;
   const joiningDate = body.joiningDate ? String(body.joiningDate) : new Date().toISOString().slice(0, 10);
   const costPerHour = Number(body.costPerHour) || 0;
   const billRatePerHour = Number(body.billRatePerHour) || 0;
+  // Monthly CTC: when sent, the first employee_salary_history row is written
+  // here, in the same request as the profile, and the whole employee is
+  // rolled back if it cannot be saved. Older app builds don't send it and
+  // insert that row themselves, as before.
+  const withSalary = body.monthlyCtc !== undefined && body.monthlyCtc !== null;
+  const monthlyCtc = withSalary ? Number(body.monthlyCtc) : 0;
 
   if (!fullName) return fail(400, "Full name is required.");
   if (!employeeCode) return fail(400, "Employee code is required.");
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail(400, "Enter a valid email address.");
   if (password.length < 8) return fail(400, "Password must be at least 8 characters.");
   if (!ASSIGNABLE_ROLES.includes(role)) return fail(400, "That role cannot be assigned here.");
-  if (costPerHour < 0 || billRatePerHour < 0) return fail(400, "Rates cannot be negative.");
-  if (!DATE_RE.test(joiningDate)) return fail(400, "Joining date must be a valid date.");
+  if (!Number.isFinite(costPerHour) || !Number.isFinite(billRatePerHour) || costPerHour < 0 || billRatePerHour < 0) {
+    return fail(400, "Rates cannot be negative.");
+  }
+  if (withSalary && (!Number.isFinite(monthlyCtc) || monthlyCtc < 0 || monthlyCtc > MAX_CTC)) {
+    return fail(400, "Monthly CTC must be a number of 0 or more.");
+  }
+  if (!validDate(joiningDate)) return fail(400, "Joining date must be a valid date.");
   if (reportsTo && !UUID_RE.test(reportsTo)) return fail(400, "The selected manager was not found.");
 
+  // Deleted employees (039_employee_soft_delete.sql) free their code and
+  // email: only non-deleted profiles count, matching the partial unique index
+  // uq_profiles_org_employee_code_live.
   const { data: existingCode, error: codeCheckErr } = await admin
     .from("profiles")
     .select("id")
     .eq("organization_id", orgId)
     .eq("employee_code", employeeCode)
+    .is("deleted_at", null)
+    .limit(1)
     .maybeSingle();
   if (codeCheckErr) return fail(500, "Could not validate the employee code.", codeCheckErr);
-  if (existingCode) return fail(409, "That employee code is already used.");
+  if (existingCode) return fail(409, "That employee code is already used.", undefined, "duplicate_code");
 
   // Same person already on the team (matched by contact email) — say so
   // plainly rather than letting it surface as an auth or insert failure.
@@ -213,11 +267,12 @@ async function handle(req: Request, json: Json): Promise<Response> {
     .select("id, full_name")
     .eq("organization_id", orgId)
     .ilike("contact_email", email.replace(/[\\%_]/g, "\\$&"))
+    .is("deleted_at", null)
     .limit(1)
     .maybeSingle();
   if (emailCheckErr) return fail(500, "Could not validate the email address.", emailCheckErr);
   if (existingEmail) {
-    return fail(409, `An employee with this email already exists (${existingEmail.full_name}).`);
+    return fail(409, `An employee with this email already exists (${existingEmail.full_name}).`, undefined, "duplicate_email");
   }
 
   if (reportsTo) {
@@ -226,6 +281,7 @@ async function handle(req: Request, json: Json): Promise<Response> {
       .select("id")
       .eq("organization_id", orgId)
       .eq("id", reportsTo)
+      .is("deleted_at", null)
       .maybeSingle();
     if (bossErr) return fail(500, "Could not validate the reporting line.", bossErr);
     if (!bossRow) return fail(400, "The selected manager was not found.");
@@ -247,7 +303,10 @@ async function handle(req: Request, json: Json): Promise<Response> {
       msg.includes("already registered") ||
       msg.includes("already exists")
     ) {
-      return fail(409, "A sign-in account with this email already exists.", createErr);
+      // Deleting an employee removes their sign-in account (delete_employee,
+      // 039), so this account is still in use — by a current employee here or
+      // in another organization — and is never removed from here.
+      return fail(409, "A sign-in account with this email already exists and is still in use.", createErr, "duplicate_account");
     }
     if (code === "weak_password" || msg.includes("password")) {
       return fail(400, "The password does not meet the sign-in password requirements.", createErr);
@@ -289,12 +348,44 @@ async function handle(req: Request, json: Json): Promise<Response> {
 
     const text = `${profileErr.message || ""} ${profileErr.details || ""}`.toLowerCase();
     if (profileErr.code === "23505" && text.includes("employee_code")) {
-      return fail(409, "That employee code is already used.", profileErr);
+      return fail(409, "That employee code is already used.", profileErr, "duplicate_code");
     }
     if (profileErr.code === "23505" && text.includes("auth_user_id")) {
-      return fail(409, "That sign-in account is already linked to an employee.", profileErr);
+      return fail(409, "That sign-in account is already linked to an employee.", profileErr, "duplicate_account");
     }
     return fail(500, "Could not create the employee profile.", profileErr);
+  }
+
+  // First salary record (CTC from the joining date) — part of creating the
+  // employee. If it cannot be saved, undo the profile and the sign-in account
+  // so a retry starts clean instead of hitting "already exists" on a
+  // half-made employee.
+  let salary: Record<string, unknown> | null = null;
+  if (withSalary) {
+    const { data: salaryRow, error: salaryErr } = await admin
+      .from("employee_salary_history")
+      .insert({
+        organization_id: orgId,
+        profile_id: profile.id,
+        company_id: companyRow.id,
+        monthly_ctc: monthlyCtc,
+        effective_from: joiningDate,
+        created_by: callerProfile.id,
+      })
+      .select("id, profile_id, monthly_ctc, effective_from, company_id")
+      .single();
+    if (salaryErr || !salaryRow) {
+      const { error: undoProfileErr } = await admin.from("profiles").delete().eq("id", profile.id);
+      if (undoProfileErr) console.error("create-employee: rollback profile delete failed", describe(undoProfileErr));
+      const { error: undoUserErr } = await admin.auth.admin.deleteUser(authUserId);
+      if (undoUserErr) console.error("create-employee: rollback deleteUser failed", describe(undoUserErr));
+      return fail(
+        500,
+        "Could not save the salary record, so the employee was not created. Try again.",
+        salaryErr || "salary insert returned no row",
+      );
+    }
+    salary = salaryRow;
   }
 
   // Queue the "you have been added" email (sent by send-notifications). The
@@ -306,5 +397,10 @@ async function handle(req: Request, json: Json): Promise<Response> {
   });
   if (notifyErr) console.error("create-employee: welcome email not queued", describe(notifyErr));
 
-  return json({ profile });
+  // The generated password goes back only to the verified partner who asked
+  // for it, over this response — it is never stored or logged.
+  const out: Record<string, unknown> = { profile };
+  if (withSalary) out.salary = salary;
+  if (generated) out.password = password;
+  return json(out);
 }

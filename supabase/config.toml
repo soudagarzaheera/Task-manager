@@ -4,6 +4,11 @@
 # platform level too means an anonymous request never even reaches the code.
 verify_jwt = true
 
+[functions.import-clients]
+# Bulk client import. Validates and inserts with the caller's own JWT (RLS
+# applies), so a valid JWT is required at the platform level as well.
+verify_jwt = true
+
 [functions.send-notifications]
 # Server-to-server only: called by pg_cron (pg_net) with no user JWT. The
 # function itself rejects any request without the NOTIFICATIONS_DISPATCH_SECRET

@@ -78,8 +78,9 @@ This document provides the architectural reference and schema specifications for
   * `auth_user_id` &rarr; `auth.users(id) ON DELETE SET NULL`
   * `(organization_id, reports_to)` &rarr; `profiles(organization_id, id) ON DELETE SET NULL`
 * **Constraints**:
-  * `UNIQUE (organization_id, employee_code)`
+  * `UNIQUE (organization_id, employee_code) WHERE deleted_at IS NULL` (`uq_profiles_org_employee_code_live`, since `039`; was a full unique constraint)
   * `UNIQUE (organization_id, id)`
+* **Deleted employees** *(`039_employee_soft_delete.sql`)*: `deleted_at`, `deleted_by`. Active = `is_active`; Inactive (reactivatable) = `NOT is_active AND deleted_at IS NULL`; Deleted = `deleted_at IS NOT NULL` (always inactive). Deleting is only through `delete_employee(profile)` (Partner, same org; blockers: active direct reports, open tasks, pending timesheet, last active partner, self). It keeps the row and all history, unlinks `auth_user_id`, deletes that `auth.users` row only if no profile still links to it, and writes `audit_logs`. A deleted employee's code and email can be reused. API users cannot change or reactivate a deleted profile (`trg_guard_profile_delete_state`), and a direct `DELETE` from the API becomes `delete_employee` (`trg_redirect_profile_delete`); service-role deletes are real deletes.
   * `role IN ('trainee', 'associate', 'senior_associate', 'senior_executive', 'assistant_manager', 'manager', 'partner', 'accounts', 'admin')` — `role` is the employee's **designation**; `accounts` / `admin` are legacy (see §18)
   * `cost_per_hour >= 0`, `bill_rate_per_hour >= 0`
 
@@ -108,6 +109,7 @@ This document provides the architectural reference and schema specifications for
   * `UNIQUE (organization_id, id)`
   * `latitude BETWEEN -90 AND 90`, `longitude BETWEEN -180 AND 180`
   * `radius_meters BETWEEN 25 AND 5000`
+* **Organization-wide** *(since `037_org_wide_sites.sql`)*: sites belong to the organization, not to a company. `company_id` is nullable and legacy (kept on pre-037 rows, NULL on new ones; not used for access). RLS: members see the organization's active sites; rank >= 60 also sees inactive sites and adds/edits/toggles them. Any active employee may punch at any active site of their own organization (`validate_attendance_site_punch`: own punch, active profile in the same org, active site in the same org, inside radius). The employee's company for attendance reporting still comes from `profiles.company_id`.
 
 ---
 
@@ -190,6 +192,8 @@ This document provides the architectural reference and schema specifications for
 * **Constraints**:
   * `punch_type IN ('in', 'out')`
 * `accuracy_meters NUMERIC(8,2)` *(added in `006_punch_accuracy.sql`)*: `position.coords.accuracy` at punch time. `NULL` when no location fix was obtained at all. Used by `geofenceCheck()` in `index.html` to apply a bounded accuracy tolerance instead of a zero-tolerance `distance <= radius` comparison.
+* **Other Place** *(added in `038_other_place_attendance.sql`)*: `location_type` (`'site'` | `'other'`, default `'site'`), `location_note` (optional description, <= 200), `resolved_address` (reverse-geocoded, <= 500), `company_id` (employee's company at punch time, server-set from `profiles.company_id`; FK `(organization_id, company_id)` &rarr; `companies`; pre-038 rows backfilled from the profile). An `'other'` punch has `location_id IS NULL`, `place_label = 'Other Place'`, no distance, `is_within_geofence = false` (not fence-checked), and requires GPS coordinates and accuracy. `trg_validate_attendance_site_punch` enforces: own punch, active employee of the org, valid coordinates, one `in` then one `out` per day; site punches additionally the active same-org site and its radius.
+* **Access (RLS)**: read own punches, or rank >= 50 for people visible to them (`auth_profile_visible`); insert own only; no update/delete through the API.
 
 ---
 
@@ -294,6 +298,14 @@ This document provides the architectural reference and schema specifications for
 * **Job codes and assigning work — Assistant Manager and above (`auth_rank() >= 60`)**: `jobs_insert` requires it; trigger `trg_tasks_assignment_rank` (`enforce_task_assignment_rank()`) rejects, for a signed-in user below it, inserting or deleting a task or changing its `assigned_to` / `assigned_by` / `job_id`. Service-role calls are exempt. Frontend: `CAN.createJob()` / `CAN.reassignTask()` (`ASSIGN_RANK`).
 * **`partner_task_assignments()`** (Work screen "Assigned by" filter) counts tasks assigned or opened by a partner, manager or assistant manager.
 * **Claim payment**: with `accounts` no longer assignable, Manager and above mark approved claims paid (never their own) — already permitted by `expense_claims_update`.
+
+---
+
+### 19. `job_services` *(added in `035_job_services.sql`)*
+* **Purpose**: The Service list of the job code form — one list per organization, shared by its companies. `jobs.service_category` stores the service's `code` as text (no FK), and the suggested job code is built from it (`CLIENT/STATAUD/2026-27`).
+* **Columns**: `code` (`^[A-Z][A-Z0-9]{1,9}$`), `name` (1–80), `is_active`, `sort_order`, `created_by`. Unique per organization: `code`, and `lower(btrim(name))`.
+* **Seed**: the 14 services the app originally hardcoded (STATAUD, TAXAUD, INTAUD, GSTR1, GSTR3B, GSTR9, ITRNA, ITRAUD, TDSRET, AOC4, MGT7, ACCTG, CERT, ADV) — for existing organizations once, and for new ones by trigger `trg_seed_job_services`.
+* **Access (RLS)**: read organization-wide; insert Assistant Manager and above (`auth_rank() >= 60`, same as `jobs_insert`). No UPDATE/DELETE privilege yet. Frontend: "+ Add Service" in the job code form, `CAN.createJob()`.
 
 ---
 
