@@ -1,7 +1,7 @@
 {
   "name": "task-manager",
   "productName": "Practice Manager",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Task Manager and Attendance System",
   "author": "Zaheera",
   "homepage": "https://github.com/soudagarzaheera/Task-manager",
@@ -20,6 +20,7 @@
     "release:win": "vite build && electron-builder --win --publish always"
   },
   "dependencies": {
+    "builder-util-runtime": "^9.7.0",
     "electron-updater": "^6.8.9"
   },
   "devDependencies": {

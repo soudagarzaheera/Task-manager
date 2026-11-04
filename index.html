@@ -7684,7 +7684,9 @@ function biTemplateSheets(kind){
     rows:[lists.map(c=>({v:c.header,s:S.headOpt}))]
       .concat(Array.from({length:maxLen},(_,i)=>lists.map(c=>c.list[i]===undefined?"":{v:c.list[i],s:S.text}))) };
 
-  return [ins, data, ex, listsSheet];
+  return kind === "clients"
+  ? [data]
+  : [ins, data, ex, listsSheet];
 }
 function biDownloadTemplate(kind){
   const K=BI_KINDS[kind];
