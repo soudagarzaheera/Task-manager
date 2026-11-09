@@ -120,6 +120,8 @@ This document provides the architectural reference and schema specifications for
   * `organization_id` &rarr; `organizations(id) ON DELETE CASCADE`
   * `(organization_id, client_id)` &rarr; `clients(organization_id, id) ON DELETE RESTRICT`
   * `(organization_id, opened_by)` &rarr; `profiles(organization_id, id) ON DELETE SET NULL`
+  * `(organization_id, responsible_partner_id)` &rarr; `profiles(organization_id, id) ON DELETE SET NULL (responsible_partner_id)` *(042)*
+* **Responsible Partner** *(`042_job_responsible_partner.sql`)*: `responsible_partner_id` is the Partner responsible for this job code, separate from the client's owner `clients.relationship_partner_id` (never written by job changes). See §20.
 * **Constraints**:
   * `UNIQUE (organization_id, job_code)`
   * `UNIQUE (organization_id, id)`
@@ -168,7 +170,7 @@ This document provides the architectural reference and schema specifications for
   * `day_index BETWEEN 0 AND 6`
   * `hours > 0 AND hours <= 24`
   * `status IN ('draft', 'pending', 'approved', 'queried')`
-* **Task link** *(wired up in `018_timesheet_task_link.sql`)*: `task_id` is optional and set from the Timesheet's "Task (Optional)" dropdown. A BEFORE trigger rejects a `task_id` whose task is not on the entry's `job_id`. When an entry with a `task_id` moves to `approved` by a manager/partner (`auth_rank() >= 70`), an AFTER trigger sets only that task to `completed` in the same transaction. Deleting a task nulls only `task_id` (`ON DELETE SET NULL (task_id)`).
+* **Task link** *(wired up in `040_timesheet_task_completion.sql`, which replaces `018`)*: `task_id` is optional and set from the Timesheet's "Task (Optional)" dropdown. A BEFORE trigger rejects a `task_id` whose task is not on the entry's `job_id`. When an entry moves to `approved`, an AFTER trigger sets only that task to `completed`, and only if the entry is the assignee's own, the task is `todo` or `in_progress`, the job is not closed, none of the assignee's entries on it is unapproved, and their approved hours reach `estimated_hours`. Undoing the approval reopens a task the trigger completed (`tasks.auto_completed_at`). Deleting a task nulls only `task_id` (`ON DELETE SET NULL (task_id)`).
 * **Approval history columns** *(added in `005_approval_history.sql`)*: `decided_by UUID`, `decided_at TIMESTAMPTZ` — set by `decideLine()` alongside `status`, cleared by `undoLine()`. Mirrors `budget_requests.decided_by/decided_at` and `expense_claims.approved_by/approved_at`, which already existed and are reused as-is.
 
 ---
@@ -257,7 +259,7 @@ This document provides the architectural reference and schema specifications for
 ---
 
 ### 14. `statutory_compliances`
-* **Purpose**: Statutory deadlines (e.g. GSTR-3B, Advance Tax, TDS) and automated job code trigger tracking.
+* **Purpose**: Reserved for client-level statutory deadlines (e.g. GSTR-3B, Advance Tax, TDS). Empty: the app only reads it, and nothing writes to it or raises job codes from it. The Statutory calendar lists job codes from `jobs.statutory_due_date` and hand-added dates from `statutory_dates` (`completed_at` marks one done, `041`).
 * **Foreign Keys**:
   * `(organization_id, client_id)` &rarr; `clients(organization_id, id) ON DELETE CASCADE`
   * `(organization_id, job_id)` &rarr; `jobs(organization_id, id) ON DELETE SET NULL`
@@ -306,6 +308,40 @@ This document provides the architectural reference and schema specifications for
 * **Columns**: `code` (`^[A-Z][A-Z0-9]{1,9}$`), `name` (1–80), `is_active`, `sort_order`, `created_by`. Unique per organization: `code`, and `lower(btrim(name))`.
 * **Seed**: the 14 services the app originally hardcoded (STATAUD, TAXAUD, INTAUD, GSTR1, GSTR3B, GSTR9, ITRNA, ITRAUD, TDSRET, AOC4, MGT7, ACCTG, CERT, ADV) — for existing organizations once, and for new ones by trigger `trg_seed_job_services`.
 * **Access (RLS)**: read organization-wide; insert Assistant Manager and above (`auth_rank() >= 60`, same as `jobs_insert`). No UPDATE/DELETE privilege yet. Frontend: "+ Add Service" in the job code form, `CAN.createJob()`.
+
+---
+
+### 20. Responsible Partner per job code *(`042_job_responsible_partner.sql`)*
+* **Model**: a client has one Relationship Partner (`clients.relationship_partner_id`, client ownership; may be any AM+). Each job has its own Responsible Partner (`jobs.responsible_partner_id`), which must be an active, not deleted `role = 'partner'` profile of the same organization — any company of it.
+* **Default**: on insert with no value, the client's Relationship Partner if they are an active Partner, else `NULL` (the app then makes the user choose). Existing jobs were backfilled the same way.
+* **Who may choose a non-default partner / change it** (`auth_can_set_job_partner(company)`, `CAN.setJobPartner()`): Partner on any job; Manager (rank 70) only on jobs of their own company (checked before and after the update). Assistant Managers and below keep the default — narrower than `jobs_update` (rank 60) on purpose. When the client has no Partner to default to, whoever may raise the job names one. Clearing it through the API is refused. Service-role calls are exempt.
+* **Triggers on `jobs`**: `trg_jobs_responsible_partner` (BEFORE INSERT / UPDATE OF responsible_partner_id — default, validation, permission; runs after `trg_jobs_company`), `trg_jobs_responsible_partner_audit` (AFTER UPDATE — `audit_logs` row `job_responsible_partner_changed`), `trg_notif_job_partner_changed` (AFTER INSERT / UPDATE — e-mail).
+* **`org_partners()`**: id, name, company, active of the organization's partners (active ones plus any still named on a job), callable by every member — `profiles` RLS hides other-company partners from non-partners.
+* **E-mail**: `job_partner_changed` → To the new partner, CC the previous one (To the previous one when the new partner made the change). A new job e-mails its partner only when it is not the client's Relationship Partner. Job e-mails follow the current partner: `task_assigned` (CC), `budget_requested` (CC), `task_overdue` (CC), `job_closed` (own copy), and the partner daily summary includes jobs the partner is responsible for.
+* **App**: New job form "Responsible Partner"; Edit job / job card "Change Responsible Partner" (current → choose → confirm); job card shows both partners; Job codes filter by responsible partner; Today card "Jobs you are responsible for" (partners); Assignment-wise and Task register reports carry the column; budget requests show it.
+
+---
+
+### 21. Holiday management *(`043_holiday_management.sql`)*
+* **`holidays`** (001) gains `description` (optional, <= 500), `created_by`, `updated_by`, `updated_at`; `name` must be 1–100 characters. One holiday per date per organization (`uq_org_holiday_date`, unchanged). Holidays are organization-wide: every employee of every company sees them (`holidays_select`, 036) in My calendar.
+* **Who writes**: Partners only (`holidays_write`, 036, unchanged).
+* **Past dates locked** (`trg_guard_holiday_change`, API users only): a holiday dated today or earlier — "today" in the organization's notification timezone, `org_today(org)` — cannot be added, moved or deleted, and a holiday cannot be moved onto such a date; its name and description stay editable. Attendance status and earned leave for those days are already settled.
+* **App**: "Holidays <year>" card on My calendar (Add / Edit / Delete for Partners; `CAN.manageHolidays()`); the day detail shows the description.
+
+---
+
+### 22. Managed designations *(`044_managed_designations.sql`)*
+* **`designations`**: `name` (2–60, unique per organization ignoring case/spaces), `access_role` (one of trainee … partner — the permission level), `is_builtin`, `is_active`, `sort_order`, `created_by` / `updated_by`. The 7 built-in designations carry the existing names (Trainee … Partner) and are seeded for every organization (`trg_seed_designations` for new ones); they are read-only.
+* **`profiles.designation_id`** → `designations(organization_id, id)` (NO ACTION). `profiles.role` remains the permission level used by `auth_rank()`, `profile_rank()` and every policy. `trg_profiles_designation_sync` keeps them in step: setting `designation_id` sets `role` to its `access_role` (designation must be active and in the same organization); setting only `role` (create-employee, older app) links the built-in designation of that role (none for legacy `accounts` / `admin`). Existing employees were linked to the built-in matching their role; no role changed.
+* **Who manages the list** (`designations_*` RLS + `trg_guard_designation_change`): everyone in the organization reads; Partner / Manager / Assistant Manager (`auth_rank() >= 60`) add, rename, (de)activate and delete — a non-partner only designations below their own level (`auth_can_manage_designation`); never a built-in. `access_role` cannot change after creation. A designation used by any employee (deleted ones included) cannot be deleted — deactivate it. Assigning designations to employees stays Partner-only (`profiles_update`).
+* **App**: Setup → Designations page (`CAN.manageDesignations()` / `CAN.editDesignation()`); the employee form lists active designations grouped by access level; new employees are created with the level's role, then the custom designation is set; Team, Profile and payslips show the designation name; hours-by-grade reports still group by access level; bulk employee import accepts designation names.
+
+### 23. Optional Saturdays / holidays and timesheet minimum *(`045_optional_days_and_timesheet_minimum.sql`)*
+* **Rule start** `optional_days_rule_from()` = 2026-11-01 (index.html `OPTIONAL_DAYS_FROM`). From then, every Saturday and every declared holiday is optional: not working is never an absence or deduction; working counts as Present. Sundays stay the weekly off. Earlier dates keep the old rules (2nd/4th Saturday holiday, extra day's pay for holiday work).
+* **Earned Leave credit**: `trg_attendance_holiday_worked` (AFTER INSERT on `attendance_punches`) calls `credit_extra_work_day()` on a punch-out dated the org's today ±1 day; it credits 1 EL day when the date is a non-Sunday Saturday/holiday (`extra_work_day_reason()`) and the day has a punch-in and a punch-out (`attendance_day_complete()`). Timesheet entries no longer earn EL (017's `trg_timesheet_holiday_worked` dropped). No extra pay for these days from Nov 2026.
+* **`earned_leave_transactions.reason`** (`saturday_worked` / `holiday_worked`, NOT NULL). The UNIQUE `(organization_id, profile_id, worked_date)` stops duplicate credits. Every credit/removal writes `audit_logs` (`earned_leave_credited` / `earned_leave_removed`). `holiday_worked_days()` now also returns `reason`, `credited_at`.
+* **`timesheet_half_days`** `(organization_id, profile_id, work_date)` PK: the owner inserts/deletes their own; readable by the owner and anyone who can see that profile. `trg_guard_timesheet_half_day` freezes it once the date has pending/approved time.
+* **`trg_timesheet_day_minimum`** (AFTER UPDATE OF status on `timesheet_entries`): when the owner submits (draft/queried → pending/approved) an entry dated from 2026-11-01, that day's total hours must be ≥ 8, or ≥ 4 when marked half day or on an approved half-day leave. Approver approve/query/undo is never checked.
 
 ---
 

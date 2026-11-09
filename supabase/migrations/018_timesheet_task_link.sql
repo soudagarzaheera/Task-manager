@@ -1,4 +1,8 @@
 -- ==============================================================================
+-- DO NOT RUN. This never ran on the live database and its rule is unsafe: any one
+-- approved entry, by anyone, completes the task. Replaced by
+-- 040_timesheet_task_completion.sql. Kept for history only.
+-- ==============================================================================
 -- 018: LINK TIMESHEET ENTRIES TO WORK TASKS + COMPLETE TASK ON APPROVAL
 -- ==============================================================================
 -- Context: timesheet_entries.task_id (with a composite FK to tasks) has existed

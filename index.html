@@ -266,8 +266,8 @@ input[type=text],input[type=number],input[type=date],input[type=email],input[typ
   padding:5px 8px;background:var(--card);width:100%;font-size:13px;
 }
 input:disabled,select:disabled{background:var(--rule-2);color:var(--ink-3)}
-label.field{display:block;margin-bottom:11px}
-label.field > span{
+label.field,div.field{display:block;margin-bottom:11px}
+label.field > span,div.field > span{
   display:block;font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;
   text-transform:uppercase;color:var(--ink-3);margin-bottom:4px;
 }
@@ -321,6 +321,58 @@ label.field > span{
 .empty{
   padding:26px;text-align:center;color:var(--ink-2);font-size:13px;
   border:1px dashed var(--rule);border-radius:var(--r);
+}
+
+/* ---------- statutory calendar ---------- */
+.sd-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.sd-grid>.card{margin-top:0}
+.sd-card{display:flex;flex-direction:column;height:232px;min-width:0;padding:9px 12px}
+.sd-head{flex:none;display:flex;align-items:center;gap:8px;height:30px;padding-bottom:6px;border-bottom:1px solid var(--rule)}
+.sd-head h2{white-space:nowrap;font-family:var(--serif);font-size:14.5px;font-weight:600;letter-spacing:-.01em;color:var(--ink-2)}
+.sd-head .spacer{flex:1}
+.sd-head .btn{padding:2px 9px;font-size:11.5px;white-space:nowrap}
+.sd-count{
+  display:inline-block;min-width:20px;padding:1px 6px;border-radius:10px;text-align:center;
+  font-family:var(--mono);font-size:10.5px;line-height:15px;
+  color:var(--ink-3);background:var(--rule-2);
+}
+.sd-count.bad{color:var(--red);background:var(--red-wash)}
+.sd-count.warn{color:var(--ochre);background:var(--ochre-wash)}
+.sd-count.info{color:#3A5578;background:var(--blue-wash)}
+.sd-list{flex:1;min-height:0;overflow-y:auto}
+.sd-row{display:flex;flex-wrap:wrap;align-items:center;gap:0 8px;border-bottom:1px solid var(--rule-2)}
+.sd-row>.btn{margin:0 0 6px auto}
+.sd-row:last-child{border-bottom:none}
+.sd-main{
+  flex:1 1 250px;min-width:0;display:flex;align-items:center;gap:9px;padding:4px;
+  border:none;background:transparent;font:inherit;color:inherit;text-align:left;
+}
+button.sd-main{cursor:pointer;border-radius:6px}
+button.sd-main:hover{background:var(--blue-wash)}
+.sd-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--ink-3)}
+.sd-dot.bad{background:var(--red)}
+.sd-dot.warn{background:var(--ochre)}
+.sd-dot.info{background:#3A5578}
+.sd-dot.ok{background:var(--green)}
+.sd-who{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.sd-line{display:flex;align-items:baseline;gap:7px;min-width:0}
+.sd-name,.sd-sub{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sd-name{font-size:13px;font-weight:500;color:var(--ink-2)}
+.sd-name .tiny{font-weight:400}
+.sd-state{flex:none;font-size:11px;color:var(--ink-3)}
+.sd-sub{font-size:11.5px;color:var(--ink-3)}
+.sd-when{flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:2px}
+.sd-date{font-size:11.5px;color:var(--ink-2);white-space:nowrap}
+.sd-empty{padding:9px 4px;font-size:12.5px;color:var(--ink-3)}
+.sd-note{margin:10px 2px 0;font-size:12px;color:var(--ink-2)}
+.sd-done{margin-top:10px;padding:9px 14px}
+.sd-done summary{cursor:pointer;font-size:13px;color:var(--ink-2)}
+.sd-done-title{font-weight:500}
+.sd-done .sd-list{margin-top:6px;max-height:230px}
+@media (max-width:860px){
+  .sd-grid{grid-template-columns:1fr}
+  .sd-card{height:auto}
+  .sd-list{max-height:260px}
 }
 
 /* ---------- modal ---------- */
@@ -809,6 +861,8 @@ async function loadAppData(orgId, currentProfileId){
   // Before 031 is applied the column is absent: treat as set up (no redirect).
   FIRM.setupComplete = !("setup_completed_at" in org) || !!org.setup_completed_at;
 
+  // Half-day marks (045) load on their own so the app still opens before 045 is applied.
+  const halfDaysP = supabase.from("timesheet_half_days").select("profile_id,work_date").eq("organization_id", ORG_ID);
   const [profilesR, companiesR, clientsR, locationsR, jobsR, tasksR, partnerTaskAssignmentsR, entriesR, holidaysR, holidayWorkedR, leavesR,
          budgetR, claimsR, claimLinesR, complianceR, nilR, punchesR] = await Promise.all([
     supabase.from("profiles").select("id,employee_code,full_name,contact_email,role,reports_to,company,company_id,joining_date,exit_date,cost_per_hour,bill_rate_per_hour,is_active,auth_user_id,created_at,deleted_at").eq("organization_id", ORG_ID).order("created_at",{ascending:true}),
@@ -880,7 +934,9 @@ async function loadAppData(orgId, currentProfileId){
     budget:+j.budget_hours||0, due:j.internal_due_date, statDue:j.statutory_due_date,
     overhead:j.is_overhead, openedBy:j.opened_by, openedOn:j.opened_on,
     closedAt:j.closed_at||null, closingNote:j.closing_note||"", companyId:j.company_id,
-    service:j.service_category||"", period:j.period_fy||""
+    service:j.service_category||"", period:j.period_fy||"",
+    // Responsible Partner of this job (042) — not the client's Relationship Partner.
+    partner:j.responsible_partner_id||null
   }));
 
   PARTNER_TASK_ASSIGNMENTS = partnerTaskAssignmentsR.data.map(a=>({
@@ -940,8 +996,8 @@ async function loadAppData(orgId, currentProfileId){
     decidedBy:x.decided_by||null, decidedAt:x.decided_at||null
   }));
 
-  HOLIDAYS = holidaysR.data.map(h=>({ date:h.holiday_date, name:h.name }));
-  HOLIDAY_WORKED = holidayWorkedR.data.map(h=>({ who:h.profile_id, date:h.holiday_date }));
+  HOLIDAYS = holidaysR.data.map(mapHoliday);
+  HOLIDAY_WORKED = holidayWorkedR.data.map(mapHolidayWorked);
   LEAVE = leavesR.data.map(l=>({
     id:l.id, who:l.profile_id, date:l.leave_date, part:l.duration_part, type:l.leave_type, status:l.status,
     reason:l.reason||"", requestId:l.request_id||l.id, rejectionReason:l.rejection_reason||"",
@@ -973,6 +1029,9 @@ async function loadAppData(orgId, currentProfileId){
   }));
 
   NIL_FILED = nilR.data.map(n=>({ who:n.profile_id, week:n.week_start_date }));
+  const halfDaysR = await halfDaysP;
+  if(halfDaysR.error){ HALF_DAYS = []; console.warn("[DATA] timesheet_half_days unavailable — run 045_optional_days_and_timesheet_minimum.sql", halfDaysR.error.message); }
+  else HALF_DAYS = halfDaysR.data.map(h=>({ who:h.profile_id, date:h.work_date }));
 
   SALARY_HISTORY = [];
   if(profilesR.data.some(p=>p.role==="partner" && p.auth_user_id===AUTH_UID)){
@@ -1042,7 +1101,7 @@ async function loadAppData(orgId, currentProfileId){
   normalizeLeaveTypes();
 
   applyCompanyScope(currentProfileId||me);
-  await Promise.all([loadPersonalEvents(), loadStatutory(), loadServices()]);
+  await Promise.all([loadPersonalEvents(), loadStatutory(), loadServices(), loadOrgPartners(), loadDesignations()]);
 
   DATA_READY = true;
 }
@@ -1477,6 +1536,22 @@ function dueTag(d){
   if(n<=3)  return '<span class="tag warn">in '+n+'d</span>';
   return '<span class="tag">in '+n+'d</span>';
 }
+/* The one rule for whether a job or task can still be overdue, used by Work,
+   Job codes, Today, My calendar and the Statutory calendar. A job with tasks,
+   all of them Done, has no work left: it is not overdue, whichever due date is
+   being shown, but it stays open until someone closes it under the usual rules.
+   A job with no tasks is not "done". Worked out from TASKS, so reopening a task
+   brings the job back. Anyone who can see a job can see all its tasks (RLS). */
+function jobWorkDone(j){
+  const ts = TASKS.filter(t=>t.job===j.id);
+  return ts.length>0 && ts.every(t=>t.status==="completed");
+}
+const jobFinished = j => j.status==="closed" || jobWorkDone(j);
+function jobDueTag(j, date){
+  if(j.status==="closed") return "";
+  return jobWorkDone(j) ? '<span class="tag ok">Tasks done</span>' : dueTag(date);
+}
+const taskDueTag = t => t.status==="completed" ? '<span class="tag ok">Done</span>' : dueTag(t.due);
 
 const STATUS_LABEL = {
   todo:"To do", in_progress:"In progress", blocked_on_client:"Waiting on client",
@@ -1486,10 +1561,31 @@ const STATUS_LABEL = {
 
 /* ================  TIME: the parts that were wrong  ================= */
 
+/* Optional working days (045, mirrors optional_days_rule_from()): from this
+   date every Saturday and every declared holiday is optional. Not working is
+   never an absence; working counts as Present and earns 1 Earned Leave once
+   the day has a punch-in and a punch-out (credited by the database). Sundays
+   keep the weekly-off rule. Earlier dates keep the old rules below, so past
+   payroll does not change. */
+const OPTIONAL_DAYS_FROM = "2026-11-01";
+/* Timesheet minimum per submitted day (045, trg_timesheet_day_minimum). */
+const MIN_FULL_DAY_HOURS = 8, MIN_HALF_DAY_HOURS = 4;
+/* Old rule (before OPTIONAL_DAYS_FROM only): 2nd/4th Saturday is a holiday. */
 function isSaturdayHoliday(date){
+  if(date >= OPTIONAL_DAYS_FROM) return false;
   const day = new Date(date+"T00:00:00Z").getUTCDay();
   const ordinal = Math.ceil(Number(date.slice(8,10))/7);
   return day===6 && (ordinal===2 || ordinal===4);
+}
+function publicHolidayOn(date){ return HOLIDAYS.find(h=>h.date===date) || null; }
+/* Saturday or declared holiday under the new rules (never a Sunday). */
+function isOptionalWorkDay(date){
+  if(date < OPTIONAL_DAYS_FROM || isSunday(date)) return false;
+  return dayOfWeek(date)===6 || !!publicHolidayOn(date);
+}
+const EL_REASON_LABEL = { saturday_worked:"Saturday worked", holiday_worked:"Holiday worked" };
+function elReasonLabel(h){
+  return EL_REASON_LABEL[h.reason] || (publicHolidayOn(h.date) ? "Holiday worked" : "Saturday worked");
 }
 /* Calendar/attendance day numbering is JavaScript's own: Sunday = 0 …
    Saturday = 6, and weeks are drawn Sunday-first. (Timesheet weeks are a
@@ -1522,6 +1618,22 @@ function holidayOn(date){
   return null;
 }
 function holidayWorkedOn(who,date){ return HOLIDAY_WORKED.some(h=>h.who===who && h.date===date); }
+/* One Earned Leave credit (earned_leave_transactions via holiday_worked_days()).
+   reason / credited_at arrive once 045 is applied; older rows fall back. */
+function mapHolidayWorked(h){
+  return { who:h.profile_id, date:h.holiday_date, reason:h.reason||null, creditedAt:h.credited_at||null };
+}
+/* The database posts the credit when a Saturday/holiday punch-out completes
+   the day (trg_attendance_holiday_worked); re-read it so balances update. */
+async function refreshEarnedLeaveCredits(){
+  const { data, error } = await supabase.rpc("holiday_worked_days");
+  if(error) return console.error("[DATA] Could not refresh earned leave credits", error);
+  HOLIDAY_WORKED = data.map(mapHolidayWorked);
+  render();
+}
+function afterPunchRecorded(type){
+  if(type==="out" && isOptionalWorkDay(TODAY)) refreshEarnedLeaveCredits();
+}
 function leaveOn(who,date){ return LEAVE.find(l=>l.who===who && l.date===date && l.status==="approved"); }
 
 /* The salary record in force on `date` (latest effective_from <= date).
@@ -1553,7 +1665,9 @@ function salaryCalculation(profile, ym, punchRows, history=SALARY_HISTORY){
   const holidaySet=new Set(holidays.map(h=>h.date).concat(dates.filter(isSaturdayHoliday)));
   const punches=punchRows.filter(p=>p.who===profile.id && p.date>=first && p.date<=last);
   const byDate=new Map(); punches.forEach(p=>{const a=byDate.get(p.date)||[];a.push(p);byDate.set(p.date,a);});
-  let present=0, absent=0, half=0, holidayWorked=0;
+  // holidayWorked counts every worked holiday/Saturday; only days under the
+  // old rules (before OPTIONAL_DAYS_FROM) are also paid an extra day.
+  let present=0, absent=0, half=0, holidayWorked=0, holidayPaidDays=0;
   for(const date of dates){
     if(profile.joined && date<profile.joined) continue;
     if(profile.left && date>profile.left) continue;
@@ -1561,7 +1675,10 @@ function salaryCalculation(profile, ym, punchRows, history=SALARY_HISTORY){
     if(isSunday(date)) continue; // Sunday is the weekly off — never present/absent/deducted.
     const dayPunches=byDate.get(date)||[], worked=dayPunches.length>0;
     const lv=LEAVE.find(l=>l.who===profile.id&&l.date===date&&l.status==="approved");
-    if(holidaySet.has(date)){ if(worked || holidayWorkedOn(profile.id,date)) holidayWorked++; continue; }
+    // Optional Saturday/holiday: worked = Present (Earned Leave is the
+    // compensation, no extra pay); not worked = nothing, never absent.
+    if(isOptionalWorkDay(date)){ if(worked){ present++; holidayWorked++; } continue; }
+    if(holidaySet.has(date)){ if(worked || holidayWorkedOn(profile.id,date)){ holidayWorked++; holidayPaidDays++; } continue; }
     if(lv){
       const type=LEAVE_TYPES.find(t=>t.code===lv.type);
       const units=lv.part==="half"?.5:1;
@@ -1573,9 +1690,9 @@ function salaryCalculation(profile, ym, punchRows, history=SALARY_HISTORY){
     else absent++;
   }
   const earned=HOLIDAY_WORKED.filter(h=>h.who===profile.id && h.date>=first && h.date<=last).length;
-  const absenceDeduction=absent*daily, halfDeduction=half*daily*.5, holidayEarning=holidayWorked*daily;
+  const absenceDeduction=absent*daily, halfDeduction=half*daily*.5, holidayEarning=holidayPaidDays*daily;
   const earnedLeaveBalance=leaveBalanceFor(profile.id,+ym.slice(0,4),last).find(b=>b.code==="EL")?.remaining||0;
-  return {who:profile.id,profile,month:ym,ctc,daily,record,hasCtc:!!record,present,absent,half,earned,earnedLeaveBalance,publicHolidays:holidaySet.size,holidayWorked,
+  return {who:profile.id,profile,month:ym,ctc,daily,record,hasCtc:!!record,present,absent,half,earned,earnedLeaveBalance,publicHolidays:holidaySet.size,holidayWorked,holidayPaidDays,
     absenceDeduction,halfDeduction,holidayEarning,final:ctc-absenceDeduction-halfDeduction+holidayEarning};
 }
 async function loadSalaryMonth(){
@@ -1604,8 +1721,8 @@ function setSalaryCompany(value){salaryCompany=value;salaryEmployee="all";salary
    doesn't hold up sequential day entry. */
 function dayInfo(who, i, week=WEEK){
   const date = addDays(week,i);
-  const hol = holidayOn(date), lv = leaveOn(who,date);
-  return { date, hol, lv, off: !!hol || (lv && lv.part==="full") };
+  const hol = holidayOn(date), lv = leaveOn(who,date), optional = isOptionalWorkDay(date);
+  return { date, hol, lv, optional, off: !!hol || optional || (lv && lv.part==="full") };
 }
 /* Every working day of the week (Mon–Sat) is covered by a holiday or leave. */
 function weekFullyOff(who, week=WEEK){ return [0,1,2,3,4,5].every(i=>dayInfo(who,i,week).off); }
@@ -1710,6 +1827,69 @@ function groupsFor(who, week=WEEK){
 }
 
 let NIL_FILED = [];   // {who, week} — a week with nothing booked still goes on record
+let HALF_DAYS = [];   // {who, date} — timesheet_half_days (045): minimum 4h instead of 8h
+
+/* Minimum hours per submitted day (from OPTIONAL_DAYS_FROM): 8, or 4 on a
+   day marked as a half day or with an approved half-day leave. Mirrors
+   trg_timesheet_day_minimum, which re-checks on submission. Applies to any
+   day with time on it — Saturdays, Sundays, holidays and leave days need
+   nothing unless time is submitted for them. */
+const isHalfDayMarked = (who,date) => HALF_DAYS.some(h=>h.who===who && h.date===date);
+function halfDayLeaveOn(who,date){ const lv=leaveOn(who,date); return !!lv && lv.part==="half"; }
+function dayMinimumHours(who,date){
+  return (isHalfDayMarked(who,date) || halfDayLeaveOn(who,date)) ? MIN_HALF_DAY_HOURS : MIN_FULL_DAY_HOURS;
+}
+const dayTotalHours = (who,date) => sum(entriesOnDate(who,date).map(x=>+x.hours||0));
+/* Days among `rows` that are below their minimum. */
+function daysBelowMinimum(who, rows){
+  return [...new Set(rows.map(dateOf))].filter(d=>d>=OPTIONAL_DAYS_FROM).sort()
+    .map(d=>({ date:d, total:dayTotalHours(who,d), min:dayMinimumHours(who,d) }))
+    .filter(x=>x.total < x.min);
+}
+async function setHalfDay(date, on){
+  if(!validISODate(date)) return;
+  if(entriesOnDate(me,date).some(x=>x.status==="pending"||x.status==="approved"))
+    return toast("Time for "+fmtShort(date)+" is already submitted — its half-day setting can no longer change");
+  const q = on
+    ? supabase.from("timesheet_half_days").insert({ organization_id:ORG_ID, profile_id:me, work_date:date })
+    : supabase.from("timesheet_half_days").delete().eq("organization_id",ORG_ID).eq("profile_id",me).eq("work_date",date);
+  const { error } = await q;
+  if(error && !(on && /duplicate key/i.test(error.message||""))){
+    render();
+    return toast(/timesheet_half_days/.test(error.message||"")
+      ? "Half days need the latest database update — ask an administrator"
+      : "Could not save — "+error.message);
+  }
+  HALF_DAYS = HALF_DAYS.filter(h=>!(h.who===me && h.date===date));
+  if(on) HALF_DAYS.push({ who:me, date });
+  toast(fmtShort(date)+(on?" marked as a half day (minimum 4h)":" is a full day again (minimum 8h)"));
+  render();
+}
+/* Per-day hours against the minimum, with the Half day switch. */
+function dayHoursHTML(week){
+  const dates=[...new Set(entriesFor(me,week).map(dateOf))].sort();
+  if(!dates.length) return "";
+  return '<div class="card" style="margin-bottom:14px"><div class="card-head"><h2>Hours per day</h2></div>'+
+    '<table><thead><tr><th>Day</th><th class="r">Booked</th><th class="r">Minimum</th><th>Half day</th><th class="r"></th></tr></thead><tbody>'+
+    dates.map(d=>{
+      const total=dayTotalHours(me,d), ruled=d>=OPTIONAL_DAYS_FROM, min=dayMinimumHours(me,d);
+      const submitted=entriesOnDate(me,d).some(x=>x.status==="pending"||x.status==="approved");
+      const leaveHalf=halfDayLeaveOn(me,d), marked=isHalfDayMarked(me,d);
+      const sw = !ruled ? '<span class="muted tiny">—</span>'
+        : leaveHalf ? '<span class="tag info">half-day leave</span>'
+        : '<label style="display:inline-flex;gap:6px;align-items:center;margin:0"><input type="checkbox" style="width:auto"'+
+            (marked?' checked':'')+(submitted?' disabled':'')+
+            ' onchange="setHalfDay(\''+d+'\',this.checked)"> Half day</label>';
+      const st = !ruled ? '<span class="muted tiny">no minimum</span>'
+        : total>=min ? '<span class="tag ok">ok</span>'
+        : '<span class="tag bad">'+hrs(min-total)+'h short</span>';
+      return '<tr><td class="num">'+weekdayDate(d)+'</td><td class="r num">'+hrs(total)+'h</td>'+
+        '<td class="r num">'+(ruled?min+'h':'—')+'</td><td>'+sw+'</td><td class="r">'+st+'</td></tr>';
+    }).join("")+'</tbody></table>'+
+    '<p class="tiny muted" style="margin-top:9px">A submitted day needs at least '+MIN_FULL_DAY_HOURS+' hours. '+
+      'Worked half a day? Tick Half day — then at least '+MIN_HALF_DAY_HOURS+' hours. '+
+      'Saturdays, Sundays, holidays and leave days need no time unless you book some.</p></div>';
+}
 const sheetStatus = (who, week=WEEK) => sheetStatusFor(who, week);
 function sheetStatusFor(who, wk){
   const rows=entriesForWeek(who, wk);
@@ -1752,6 +1932,12 @@ const CAN = {
   manageStatutory:()      => rank()>=ASSIGN_RANK,
   /* Editing a job code's details: same people who can raise one (jobs_update, 032). */
   editJob:        ()      => rank()>=ASSIGN_RANK,
+  /* A job's Responsible Partner — choosing one other than the default, or
+     changing it later: a Partner on any job, a Manager only on their own
+     company's jobs. Deliberately narrower than editJob (Assistant Managers
+     keep the default). Same rule as auth_can_set_job_partner() (042). */
+  setJobPartner:  (companyId) => rank()>=RANK.partner ||
+                             (rank()>=RANK.manager && !!companyId && companyId===person(me).companyId),
   reassignTask:   ()      => rank()>=ASSIGN_RANK,
   editTaskStatus: (t)     => t.who===me || rank()>=50,
   seeTeamAtt:     ()      => rank()>=50,
@@ -1779,6 +1965,14 @@ const CAN = {
      applyLeave()), same as their timesheet. */
   approveLeave:   (owner, r) => canApproveLeaveRequest(me, owner, r),
   manageLeavePolicy: ()   => rank()>=90,
+  /* Organization-wide holidays: Partners only — same as holidays_write (036).
+     Dates up to today are locked (trg_guard_holiday_change, 043). */
+  manageHolidays: ()      => person(me).role==="partner",
+  /* Designation list: Partner, Manager, Assistant Manager (designations_* RLS, 044). */
+  manageDesignations: ()  => rank()>=ASSIGN_RANK,
+  /* One designation: never a built-in; a non-partner only below their own level
+     (auth_can_manage_designation, 044). */
+  editDesignation: (d)    => !!d && !d.builtin && (rank()>=RANK.partner || (rank()>=ASSIGN_RANK && (RANK[d.accessRole]||0) < rank())),
   viewSalary:     ()      => person(me).role==="partner"
 };
 /* The Approvals page: Senior Executive and above, a legacy "accounts" profile,
@@ -1997,7 +2191,7 @@ function leaveBalanceFor(who, year, asOf){
     const override = LEAVE_BALANCES.find(b=>b.who===who && b.code===t.code && b.year===year);
     const allocated = override ? override.allocated : t.annualDays;
     const rowsThisYear = LEAVE.filter(l=>l.who===who && l.type===t.code &&
-      l.date.slice(0,4)===String(year) && l.date<=asOf && !isSaturdayHoliday(l.date));
+      l.date.slice(0,4)===String(year) && l.date<=asOf && !isSaturdayHoliday(l.date) && !isOptionalWorkDay(l.date));
     const used    = sum(rowsThisYear.filter(l=>l.status==="approved").map(l=>l.part==="half"?0.5:1));
     const pending = sum(rowsThisYear.filter(l=>l.status==="pending").map(l=>l.part==="half"?0.5:1));
     const earned = t.code==="EL" ? HOLIDAY_WORKED.filter(h=>h.who===who && h.date.slice(0,4)===String(year) && h.date<=asOf).length : 0;
@@ -2045,7 +2239,7 @@ VIEWS.today = {
     const mine = TASKS.filter(t=>t.who===me && t.status!=="completed");
     const live = JOBS.filter(j=>!j.overhead && j.status!=="closed");
     const over = live.filter(isJobOverBudget);
-    const late = live.filter(j=>daysTo(j.due)<0);
+    const late = live.filter(j=>!jobWorkDone(j) && daysTo(j.due)<0);
     const last = punches[punches.length-1];
     const booked = bookedFor(me);
     const st = sheetStatus(me);
@@ -2054,6 +2248,10 @@ VIEWS.today = {
       '<div class="card"><div class="eyebrow">Attendance</div>'+
         (last ? '<div style="margin-top:10px">'+stampHTML(last)+'</div>'
               : isSunday(TODAY) ? '<p class="muted tiny" style="margin:10px 0 12px"><span class="tag info">Holiday</span> Sunday — no attendance needed.</p>'
+              : isOptionalWorkDay(TODAY) ? '<p class="muted tiny" style="margin:10px 0 12px"><span class="tag info">Optional</span> '+
+                  (publicHolidayOn(TODAY) ? esc(publicHolidayOn(TODAY).name) : 'Saturday')+
+                  ' — attendance is optional. Working today? Punch in and out to be marked Present and earn 1 Earned Leave.</p>'+
+                '<button class="btn ghost" onclick="go(\'attendance\')">Mark attendance</button>'
               : '<p class="muted tiny" style="margin:10px 0 12px">Not marked yet.</p>'+
                 '<button class="btn" onclick="go(\'attendance\')">Mark attendance</button>')+
       '</div>'+
@@ -2077,6 +2275,23 @@ VIEWS.today = {
         '<div class="kpi-label">of '+live.length+' live job codes'+(late.length?", "+late.length+" past due":"")+
           ' — <span class="link-text">'+(over.length?"view them":"open job codes")+'</span></div>'+
       '</div></div>';
+
+    /* Partners: the job codes they are the Responsible Partner of (042). */
+    if(person(me).role==="partner"){
+      const myJobs = live.filter(j=>j.partner===me);
+      const myOver = myJobs.filter(isJobOverBudget).length;
+      const myLate = myJobs.filter(j=>!jobWorkDone(j) && daysTo(j.due)<0).length;
+      h += '<div class="card card-link" role="button" tabindex="0" style="margin-top:14px" onclick="openMyPartnerJobs()" '+
+        'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openMyPartnerJobs()}" '+
+        'aria-label="Jobs you are responsible for: '+myJobs.length+'. Open job codes filtered to them">'+
+        '<div class="eyebrow">Jobs you are responsible for</div>'+
+        '<div style="display:flex;gap:26px;flex-wrap:wrap;align-items:baseline;margin-top:8px">'+
+          '<div><div class="kpi">'+myJobs.length+'</div><div class="kpi-label">live job codes</div></div>'+
+          '<div><div class="kpi '+(myOver?"bad":"")+'">'+myOver+'</div><div class="kpi-label">over budget</div></div>'+
+          '<div><div class="kpi '+(myLate?"warn":"")+'">'+myLate+'</div><div class="kpi-label">past internal due</div></div>'+
+          '<span class="link-text tiny">'+(myJobs.length?"view them":"open job codes")+'</span>'+
+        '</div></div>';
+    }
 
     h += '<div class="card" style="margin-top:14px"><div class="card-head"><h2>Your work</h2>'+
       '<span class="spacer"></span><button class="btn ghost sm" onclick="go(\'work\')">All work</button></div>'+
@@ -2141,6 +2356,7 @@ VIEWS.mytime = {
         'left. Need more on a job? Use “Request more hours” on the Job codes screen.</p></div>';
 
     h += quickHTML(locked,TIMESHEET_WEEK);
+    h += dayHoursHTML(TIMESHEET_WEEK);
 
     /* submit controls */
     h += '<div style="display:flex;gap:8px;align-items:center;margin-top:16px;flex-wrap:wrap">';
@@ -2275,9 +2491,9 @@ VIEWS.salary = {
     h+='<div class="grid g3" style="margin-bottom:14px"><div class="card"><div class="eyebrow">Total employees</div><div class="kpi" style="margin-top:7px">'+rows.length+'</div></div><div class="card"><div class="eyebrow">Total CTC</div><div class="kpi" style="margin-top:7px">'+money(totals.ctc)+'</div></div><div class="card"><div class="eyebrow">Absence deductions</div><div class="kpi" style="margin-top:7px">'+money(totals.absence)+'</div></div><div class="card"><div class="eyebrow">Holiday earnings</div><div class="kpi" style="margin-top:7px">'+money(totals.holiday)+'</div></div><div class="card"><div class="eyebrow">Total payable salary</div><div class="kpi" style="margin-top:7px">'+money(totals.pay)+'</div></div></div>';
     h+='<div class="card" style="overflow-x:auto"><div class="card-head"><h2>'+esc(monthLabel(salaryMonth))+'</h2></div><table><thead><tr><th>Employee</th><th class="r">CTC</th><th class="r">Daily CTC</th><th class="r">Present</th><th class="r">Absent</th><th class="r">EL earned</th><th class="r">EL balance</th><th class="r">Holiday worked</th><th class="r">Absence deduction</th><th class="r">Holiday earning</th><th class="r">Final salary</th><th class="r">Payslip</th></tr></thead><tbody>'+ 
       (shown.length?shown.map(r=>'<tr><td><button class="text-link" onclick="openSalaryDetail(\''+r.who+'\')">'+esc(r.profile.name)+'</button>'+
-        (salaryCompany==="all"?'<div class="tiny muted">'+esc(companyFullName(salaryCompanyAt(r.profile,monthRange(salaryMonth)[1])))+'</div>':'')+(r.hasCtc?'':'<div class="tiny" style="color:var(--red)">Monthly CTC not set</div>')+'</td><td class="r num">'+money(r.ctc)+'</td><td class="r num">'+money(r.daily)+'</td><td class="r num">'+r.present+'</td><td class="r num">'+r.absent+'</td><td class="r num">'+r.earned+'</td><td class="r num">'+fmtDays(r.earnedLeaveBalance)+'</td><td class="r num">'+r.holidayWorked+'</td><td class="r num">'+money(r.absenceDeduction+r.halfDeduction)+'</td><td class="r num">'+money(r.holidayEarning)+'</td><td class="r num"><button class="text-link" onclick="openSalaryDetail(\''+r.who+'\')">'+money(r.final)+'</button></td><td class="r"><button class="btn ghost sm" onclick="downloadPayslip(\''+r.who+'\',\'partner\')"'+(r.hasCtc?'':' disabled title="Monthly CTC not set"')+'>Download PDF</button></td></tr>').join(''):'<tr><td colspan="12" class="muted">No employees for this month.</td></tr>')+'</tbody></table><p class="tiny muted" style="margin-top:10px">Daily CTC always uses monthly CTC ÷ 30. Sunday is treated as the weekly off. Attendance days are based on the existing punch log.</p></div>';
+        (salaryCompany==="all"?'<div class="tiny muted">'+esc(companyFullName(salaryCompanyAt(r.profile,monthRange(salaryMonth)[1])))+'</div>':'')+(r.hasCtc?'':'<div class="tiny" style="color:var(--red)">Monthly CTC not set</div>')+'</td><td class="r num">'+money(r.ctc)+'</td><td class="r num">'+money(r.daily)+'</td><td class="r num">'+r.present+'</td><td class="r num">'+r.absent+'</td><td class="r num">'+r.earned+'</td><td class="r num">'+fmtDays(r.earnedLeaveBalance)+'</td><td class="r num">'+r.holidayWorked+'</td><td class="r num">'+money(r.absenceDeduction+r.halfDeduction)+'</td><td class="r num">'+money(r.holidayEarning)+'</td><td class="r num"><button class="text-link" onclick="openSalaryDetail(\''+r.who+'\')">'+money(r.final)+'</button></td><td class="r"><button class="btn ghost sm" onclick="downloadPayslip(\''+r.who+'\',\'partner\')"'+(r.hasCtc?'':' disabled title="Monthly CTC not set"')+'>Download PDF</button></td></tr>').join(''):'<tr><td colspan="12" class="muted">No employees for this month.</td></tr>')+'</tbody></table><p class="tiny muted" style="margin-top:10px">Daily CTC always uses monthly CTC ÷ 30. Sunday is treated as the weekly off. From 1 Nov 2026 Saturdays and holidays are optional working days (never absent; worked = Present + 1 Earned Leave). Attendance days are based on the existing punch log.</p></div>';
     const d=shown.find(r=>r.who===salaryDetailId);
-    if(d) h+='<div class="card" style="margin-top:14px"><div class="card-head"><h2>'+esc(d.profile.name)+' · '+esc(monthLabel(d.month))+'</h2><span class="spacer"></span>'+(d.hasCtc?'<button class="btn sm" onclick="downloadPayslip(\''+d.who+'\',\'partner\')">Download payslip (PDF)</button> ':'')+'<button class="btn ghost sm" onclick="closeSalaryDetail()">Close</button></div><div class="grid g2"><div><div class="eyebrow">Salary</div><p>Monthly CTC: <strong>'+money(d.ctc)+'</strong></p><p>Daily CTC (CTC ÷ 30): <strong>'+money(d.daily)+'</strong></p></div><div><div class="eyebrow">Attendance</div><p>Present '+d.present+' · Absent '+d.absent+' · Half days '+d.half+'</p><p>Earned leave '+d.earned+' · Public holidays '+d.publicHolidays+' · Holiday worked '+d.holidayWorked+'</p></div></div><table style="margin-top:12px"><tbody><tr><td>Monthly CTC</td><td class="r num">'+money(d.ctc)+'</td></tr><tr><td>Absence deduction ('+d.absent+' × daily CTC)</td><td class="r num">−'+money(d.absenceDeduction)+'</td></tr><tr><td>Half-day deduction ('+d.half+' × daily CTC × 0.5)</td><td class="r num">−'+money(d.halfDeduction)+'</td></tr><tr><td>Holiday-worked earning ('+d.holidayWorked+' × daily CTC)</td><td class="r num">+'+money(d.holidayEarning)+'</td></tr><tr><td><strong>Final salary</strong></td><td class="r num"><strong>'+money(d.final)+'</strong></td></tr></tbody></table><p class="tiny muted" style="margin-top:9px">Approved earned leave and normal public holidays do not reduce salary. Unpaid leave uses the existing leave policy.</p></div>';
+    if(d) h+='<div class="card" style="margin-top:14px"><div class="card-head"><h2>'+esc(d.profile.name)+' · '+esc(monthLabel(d.month))+'</h2><span class="spacer"></span>'+(d.hasCtc?'<button class="btn sm" onclick="downloadPayslip(\''+d.who+'\',\'partner\')">Download payslip (PDF)</button> ':'')+'<button class="btn ghost sm" onclick="closeSalaryDetail()">Close</button></div><div class="grid g2"><div><div class="eyebrow">Salary</div><p>Monthly CTC: <strong>'+money(d.ctc)+'</strong></p><p>Daily CTC (CTC ÷ 30): <strong>'+money(d.daily)+'</strong></p></div><div><div class="eyebrow">Attendance</div><p>Present '+d.present+' · Absent '+d.absent+' · Half days '+d.half+'</p><p>Earned leave '+d.earned+' · Public holidays '+d.publicHolidays+' · Holiday worked '+d.holidayWorked+'</p></div></div><table style="margin-top:12px"><tbody><tr><td>Monthly CTC</td><td class="r num">'+money(d.ctc)+'</td></tr><tr><td>Absence deduction ('+d.absent+' × daily CTC)</td><td class="r num">−'+money(d.absenceDeduction)+'</td></tr><tr><td>Half-day deduction ('+d.half+' × daily CTC × 0.5)</td><td class="r num">−'+money(d.halfDeduction)+'</td></tr><tr><td>Holiday-worked earning ('+d.holidayPaidDays+' × daily CTC'+(d.month>=OPTIONAL_DAYS_FROM.slice(0,7)?' — none from Nov 2026; Earned Leave instead':'')+')</td><td class="r num">+'+money(d.holidayEarning)+'</td></tr><tr><td><strong>Final salary</strong></td><td class="r num"><strong>'+money(d.final)+'</strong></td></tr></tbody></table><p class="tiny muted" style="margin-top:9px">Approved earned leave and normal public holidays do not reduce salary. Unpaid leave uses the existing leave policy. From 1 Nov 2026 Saturdays and holidays are optional: not working them is never an absence, and working one counts as Present and earns 1 Earned Leave instead of extra pay.</p></div>';
     return h;
   }
 };
@@ -2333,7 +2549,7 @@ function payslipData(calc){
   const p = calc.profile;
   const companyId = (calc.record && calc.record.companyId) || p.companyId;
   const earnings = [["Basic monthly salary (CTC)", calc.ctc]];
-  if(calc.holidayWorked) earnings.push(["Holidays worked ("+calc.holidayWorked+" day"+(calc.holidayWorked===1?"":"s")+")", calc.holidayEarning]);
+  if(calc.holidayPaidDays) earnings.push(["Holidays worked ("+calc.holidayPaidDays+" day"+(calc.holidayPaidDays===1?"":"s")+")", calc.holidayEarning]);
   const deductions = [];
   if(calc.absent) deductions.push(["Loss of pay — absent ("+calc.absent+" day"+(calc.absent===1?"":"s")+")", calc.absenceDeduction]);
   if(calc.half) deductions.push(["Loss of pay — half days ("+calc.half+")", calc.halfDeduction]);
@@ -2341,14 +2557,14 @@ function payslipData(calc){
   const [first,last] = monthRange(calc.month);
   return {
     companyId, companyName: companyFullName(companyId) || FIRM.name, organizationName: FIRM.name,
-    employeeName: p.name, employeeId: p.code || "", designation: ROLE_LABEL[p.role] || p.role || "",
+    employeeName: p.name, employeeId: p.code || "", designation: desigName(p) || ROLE_LABEL[p.role] || p.role || "",
     department: p.department || "",          // no department field exists yet — printed only when present
     month: calc.month, period: monthLabel(calc.month), periodFrom: first, periodTo: last,
     joined: p.joined || "", monthlyCtc: calc.ctc, annualCtc: calc.ctc*12, dailyRate: calc.daily,
     ctcEffectiveFrom: calc.record ? calc.record.effective : "",
     attendance: [["Days in month", datesBetween(first,last).length], ["Days present", calc.present],
       ["Absent (loss of pay)", calc.absent], ["Half days (loss of pay)", calc.half],
-      ["Holidays in month", calc.publicHolidays], ["Holidays worked", calc.holidayWorked],
+      ["Holidays in month", calc.publicHolidays], ["Saturdays / holidays worked", calc.holidayWorked],
       ["Earned leave balance", fmtDays(calc.earnedLeaveBalance)]],
     earnings, deductions, gross, totalDeductions, net: calc.final,
     provisional: calc.month === TODAY.slice(0,7),
@@ -2664,6 +2880,24 @@ VIEWS.mysalary = {
   }
 };
 
+/* Earned Leave credit history: one row per worked Saturday / holiday
+   (earned_leave_transactions — the database prevents duplicates). */
+function earnedLeaveHistoryHTML(who){
+  const year=String(currentLeaveYear());
+  const rows=HOLIDAY_WORKED.filter(h=>h.who===who && h.date.slice(0,4)===year)
+    .slice().sort((a,b)=>a.date<b.date?1:-1);
+  return '<div class="card"><div class="card-head"><h2>Earned Leave credits</h2><span class="spacer"></span>'+
+    '<span class="eyebrow">'+year+'</span></div>'+
+    (rows.length
+      ? '<table><thead><tr><th>Date worked</th><th>Reason</th><th class="r">Credited</th></tr></thead><tbody>'+
+        rows.map(h=>'<tr><td class="num">'+fmtDate(h.date)+' <span class="muted tiny">'+WEEKDAY_NAMES[dayOfWeek(h.date)]+'</span></td>'+
+          '<td>'+esc(elReasonLabel(h))+(publicHolidayOn(h.date)?' <span class="muted tiny">'+esc(publicHolidayOn(h.date).name)+'</span>':'')+'</td>'+
+          '<td class="r num">+1 day</td></tr>').join("")+'</tbody></table>'
+      : '<div class="empty">No Earned Leave credits this year.</div>')+
+    '<p class="tiny muted" style="margin-top:10px">Working a Saturday or a declared holiday (punch in and punch out) earns 1 Earned Leave day. '+
+      'Sundays and ordinary working days do not.</p></div>';
+}
+
 VIEWS.leave = {
   title:"Leave",
   sub(){
@@ -2698,17 +2932,19 @@ VIEWS.leave = {
         '<td class="r num strong '+(b.remaining<0?"bad":"")+'">'+fmtDays(b.remaining)+'</td></tr>').join("")+
       '</tbody></table></div>';
 
+    h += earnedLeaveHistoryHTML(me);
+
     if(CAN.viewSalary()){
       const earnedLeaveRows=staff().map(p=>{
         const balance=leaveBalanceFor(p.id).find(b=>b.code==="EL");
         const dates=HOLIDAY_WORKED.filter(d=>d.who===p.id&&d.date.slice(0,4)===String(currentLeaveYear()))
-          .map(d=>fmtShort(d.date));
+          .map(d=>fmtShort(d.date)+" ("+(elReasonLabel(d)==="Holiday worked"?"holiday":"Sat")+")");
         return '<tr><td>'+esc(p.name)+'</td><td>'+ (dates.length?esc(dates.join(", ")):'<span class="muted">—</span>')+
           '</td><td class="r num">'+fmtDays(balance?balance.remaining:0)+'</td></tr>';
       }).join("");
       h+='<div class="card"><div class="card-head"><h2>Team earned leave</h2><span class="spacer"></span>'+ 
         '<span class="eyebrow">'+currentLeaveYear()+'</span></div>'+ 
-        '<table><thead><tr><th>Employee</th><th>Holiday-worked dates</th><th class="r">Earned Leave balance</th></tr></thead><tbody>'+ 
+        '<table><thead><tr><th>Employee</th><th>Saturday / holiday worked dates</th><th class="r">Earned Leave balance</th></tr></thead><tbody>'+ 
         (earnedLeaveRows||'<tr><td colspan="3" class="muted">No employees.</td></tr>')+'</tbody></table></div>';
     }
 
@@ -2866,6 +3102,7 @@ function renderPendingApprovals(){
     h += bq.length ? bq.map(b=>
       '<div class="line pending"><div class="line-top">'+
       '<span class="code strong">'+esc(job(b.job).code)+'</span>'+
+      (job(b.job).partner ? '<span class="tiny muted">Partner: '+esc(partnerName(job(b.job).partner))+'</span>' : '')+
       '<span class="num">+'+hrs(b.to-b.from)+'h additional</span>'+
       '<span class="tiny muted">'+hrs(job(b.job).budget)+'h budgeted stays unchanged</span>'+
       '<span class="tiny muted">'+esc(person(b.by).name)+', '+fmtDate(b.on)+'</span>'+
@@ -3052,6 +3289,7 @@ function showBudgetDetail(id){
   modal('<h3>Budget increase — '+esc(job(b.job).code)+'</h3>'+
     '<table><tbody>'+
     '<tr><td class="tiny muted">Job code</td><td class="wrap">'+esc(job(b.job).code)+' — '+esc(job(b.job).title)+'</td></tr>'+
+    '<tr><td class="tiny muted">Responsible partner</td><td>'+(job(b.job).partner ? esc(partnerName(job(b.job).partner)) : '—')+'</td></tr>'+
     '<tr><td class="tiny muted">Requested by</td><td>'+esc(person(b.by).name)+'</td></tr>'+
     '<tr><td class="tiny muted">Requested on</td><td>'+fmtDate(b.on)+'</td></tr>'+
     '<tr><td class="tiny muted">Additional hours requested</td><td>+'+hrs(b.to-b.from)+'h</td></tr>'+
@@ -3164,6 +3402,9 @@ VIEWS.attendance = {
       '<div class="card"><div class="card-head"><h2>Mark attendance</h2></div>'+
       '<p class="tiny muted" style="margin-bottom:14px">Your browser will ask for location. Nothing leaves this page — '+
       'the distance is worked out locally so you can see how the geofence behaves.</p>'+
+      (isOptionalWorkDay(TODAY) ? '<p class="tiny" style="margin-bottom:14px"><span class="tag info">Optional day</span> '+
+        (publicHolidayOn(TODAY) ? esc(publicHolidayOn(TODAY).name) : 'Saturday')+
+        ': attendance is optional. If you work, punch in and out — you are marked Present and earn 1 Earned Leave.</p>' : '')+
       '<label class="field"><span>Office site</span><select id="punchSite" onchange="setPunchSite(this.value)">'+ 
       '<option value="">Select Office Site</option>'+PUNCH_SITES.map(s=>'<option value="'+s.id+'"'+(s.id===selectedPunchSiteId?' selected':'')+'>'+esc(s.label)+'</option>').join("")+
       '<option value="'+OTHER_PLACE+'"'+(otherSelected?' selected':'')+'>Other Place (client visit, official work)</option>'+
@@ -3209,6 +3450,7 @@ VIEWS.attendance = {
               '<td>'+(r.last?punchPlaceHTML(r.last,true):"—")+'</td>'+
               '<td class="r">'+(
                 isSunday(TODAY) && !r.any ? '<span class="tag info">holiday</span>'
+                : isOptionalWorkDay(TODAY) && !r.any ? '<span class="tag info">optional day</span>'
                 : r.lv ? '<span class="tag info">'+esc(r.lv.type)+' approved</span>'
                 : r.flagged ? '<span class="tag bad">needs review</span>'
                 : r.any ? '<span class="tag ok">recorded</span>'
@@ -3262,6 +3504,18 @@ function attendanceDayStatus(who, d, inP, outP){
 function attendanceDayStatusOf(who, d, inP, outP){
   const hol = holidayOn(d);
   const lv = leaveOn(who, d);
+  if(isOptionalWorkDay(d)){
+    const ph = publicHolidayOn(d);
+    if(inP && outP){
+      const outsideFence = p => p.ok===false && p.locType!=="other";
+      const flagged = inP.flagged || outP.flagged || outsideFence(inP) || outsideFence(outP);
+      return { label:(flagged?"Present — flagged":"Present")+" · "+(ph?"Holiday worked":"Saturday worked"), tag:flagged?"warn":"ok" };
+    }
+    if(inP) return d===TODAY ? { label:"Punched in — not out yet", tag:"warn" }
+                             : { label:"Missing punch-out", tag:"bad" };
+    if(lv) return { label:esc(leaveTypeLabel(lv.type))+(lv.part!=="full"?" (half day)":""), tag:"info" };
+    return { label:ph ? "Holiday — "+ph.name : "Saturday — optional", tag:"info" };
+  }
   if(hol){
     if(holidayWorkedOn(who,d)) return { label:"Holiday Worked", tag:"ok" };
     return { label:isSaturdayHoliday(d)?"Saturday Holiday":"Holiday — "+hol.name, tag:"info" };
@@ -3435,7 +3689,7 @@ VIEWS.work = {
         '<span class="code">' + esc(j.code) + '</span><span class="spacer"></span>' +
         (closed
           ? '<span class="tag">Closed — no new assignments</span>'
-          : (CAN.createJob() ? '<button class="btn ghost sm" onclick="newTask(\'' + jid + '\')">Add task</button> ' : '') + dueTag(j.due)) +
+          : (CAN.createJob() ? '<button class="btn ghost sm" onclick="newTask(\'' + jid + '\')">Add task</button> ' : '') + jobDueTag(j, j.due)) +
         '</div>' +
         (!list.length ? '<div class="empty">No tasks on this job yet.</div>' :
         '<table><thead><tr><th>Task</th><th style="width:140px">Assigned to</th><th style="width:130px">Assigned by</th>' +
@@ -3459,7 +3713,7 @@ VIEWS.work = {
                 ["todo", "in_progress", "blocked_on_client", "submitted_for_review", "changes_requested", "completed"]
                 .map(s => '<option value="' + s + '"' + (s === t.status ? " selected" : "") + '>' + STATUS_LABEL[s] + '</option>').join("") + '</select>'
               : '<span class="tag">' + STATUS_LABEL[t.status] + '</span>') + '</td>' +
-            '<td>' + dueTag(t.due) + '</td><td class="r num">' + hrs(t.est) + 'h</td>' +
+            '<td>' + taskDueTag(t) + '</td><td class="r num">' + hrs(t.est) + 'h</td>' +
             '<td class="r"><button class="btn ghost sm" style="padding:2px 6px;font-size:11px" onclick="viewTaskHistory(\'' + t.id + '\')">History</button></td></tr>';
         }).join("") +
         '</tbody></table>') + '</div>';
@@ -3487,6 +3741,25 @@ function openOverBudgetJobs(){
   go("jobs");                        // resets the filter, closes the mobile menu, scrolls to top
   if(count) setJobsFilter("over");   // 0 over budget: Job codes opens normally
 }
+/* Responsible Partner filter (042): "all", "none" (not set) or a partner id.
+   Reset by go() like jobsFilter. */
+let jobsPartnerFilter = "all";
+function setJobsPartnerFilter(v){ jobsPartnerFilter = v || "all"; render(); }
+const jobMatchesPartnerFilter = j =>
+  jobsPartnerFilter==="all" || (jobsPartnerFilter==="none" ? !j.partner : j.partner===jobsPartnerFilter);
+/* Today → "Jobs you are responsible for" */
+function openMyPartnerJobs(){ go("jobs"); setJobsPartnerFilter(me); }
+function jobsPartnerFilterHTML(){
+  const ids = new Set(JOBS.filter(j=>!j.overhead && j.partner).map(j=>j.partner));
+  activeJobPartners().forEach(p=>ids.add(p.id));
+  const list = [...ids].map(id=>({ id, name:partnerName(id) })).filter(p=>p.name).sort((a,b)=>a.name.localeCompare(b.name));
+  if(!list.length) return '';
+  const opt = (v, label) => '<option value="'+v+'"'+(jobsPartnerFilter===v?" selected":"")+'>'+esc(label)+'</option>';
+  return '<label class="field" style="margin:0;min-width:200px"><span>Responsible partner</span>'+
+    '<select onchange="setJobsPartnerFilter(this.value)">'+opt("all","All partners")+
+    list.map(p=>opt(p.id, p.name+(p.id===me?" (you)":""))).join("")+
+    (JOBS.some(j=>!j.overhead && !j.partner) ? opt("none","Not set") : '')+'</select></label>';
+}
 
 VIEWS.jobs = {
   title:"Job codes", sub:()=>"Budgeted hours against actual, all grades included",
@@ -3495,10 +3768,9 @@ VIEWS.jobs = {
       (CAN.createJob()
         ? '<button class="btn" onclick="newJob()">New job code</button>'
         : '<span class="tiny muted">Assistant Manager and above can raise a job code.</span>')+
-      '</div><p class="tiny muted">Recurring statutory work is raised automatically from the '+
-      'statutory calendar. Use this for one-off and annual engagements.</p></div>';
-    const active = JOBS.filter(j=>!j.overhead && j.status!=="closed");
-    const closedJobs = JOBS.filter(j=>!j.overhead && j.status==="closed")
+      '</div>'+jobsPartnerFilterHTML()+'</div>';
+    const active = JOBS.filter(j=>!j.overhead && j.status!=="closed" && jobMatchesPartnerFilter(j));
+    const closedJobs = JOBS.filter(j=>!j.overhead && j.status==="closed" && jobMatchesPartnerFilter(j))
       .sort((a,b)=>(b.closedAt||"").localeCompare(a.closedAt||""));
     if(jobsFilter==="over"){
       // Same rule and same list as the Today "Jobs over budget" count.
@@ -3521,6 +3793,21 @@ VIEWS.jobs = {
         : '<div class="card"><div class="empty">No closed jobs yet.</div></div>');
   }
 };
+/* Job card: the job's Responsible Partner, with the client's Relationship
+   Partner beside it — job responsibility and client ownership side by side. */
+function jobPartnerLineHTML(j){
+  const rp = clientOf(j.client).partner;
+  const rpName = rp ? (person(rp).name!=="—" ? person(rp).name : partnerName(rp)) : "";
+  return '<div class="tiny" style="display:flex;gap:6px 14px;align-items:baseline;flex-wrap:wrap;margin:-2px 0 10px">'+
+    '<span><span class="muted">Responsible partner:</span> '+
+      (j.partner ? '<strong>'+esc(partnerName(j.partner))+'</strong>'+(j.partner===me?' <span class="tag info">you</span>':'')
+                 : '<span class="tag warn">Not set</span>')+'</span>'+
+    (rpName ? '<span class="muted">Client relationship partner: '+esc(rpName)+'</span>' : '')+
+    (CAN.setJobPartner(j.companyId)
+      ? '<button class="btn ghost sm" onclick="changeJobPartner(\''+j.id+'\')">'+(j.partner?'Change partner':'Set partner')+'</button>'
+      : '')+
+    '</div>';
+}
 function jobCardHTML(j){
       const used=jobHours(j.id), extra=jobExtraHours(j.id), avail=j.budget+extra, pct=avail?used/avail*100:0;
       const closed=j.status==="closed";
@@ -3531,7 +3818,8 @@ function jobCardHTML(j){
         '<div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:8px">'+
           '<span class="code">'+esc(j.code)+'</span>'+
           '<span class="tiny muted">'+esc(clientOf(j.client).name)+'</span>'+
-          '<span class="spacer" style="flex:1"></span>'+(closed?"":dueTag(j.due))+'</div>'+
+          '<span class="spacer" style="flex:1"></span>'+jobDueTag(j, j.due)+'</div>'+
+        jobPartnerLineHTML(j)+
         (closed?'<p class="tiny muted" style="margin:-2px 0 8px">Closed'+(j.closedAt?' on '+fmtDate(j.closedAt.slice(0,10)):'')+
           (j.closingNote?' — “'+esc(j.closingNote)+'”':'')+'. No new tasks can be assigned.</p>':'')+
         scale(avail, used)+
@@ -3626,9 +3914,9 @@ VIEWS.expenses = {
    Loaded on their own, so a failure here never blocks the rest of the app. */
 let STATUTORY_DATES = [], STAT_CATEGORIES = [], STATUTORY_ERROR = "";
 let statCatReturn = null;   // the add/edit form to return to after Manage categories
-const SD_COLS = "id,company_id,client_id,category_id,title,due_date,description,created_by";
+const SD_COLS = "id,company_id,client_id,category_id,title,due_date,description,created_by,completed_at,completed_by";
 const mapStatDate = d => ({ id:d.id, companyId:d.company_id, clientId:d.client_id, categoryId:d.category_id, title:d.title,
-  date:d.due_date, notes:d.description||"", createdBy:d.created_by });
+  date:d.due_date, notes:d.description||"", createdBy:d.created_by, completedAt:d.completed_at||null, completedBy:d.completed_by||null });
 const mapStatCategory = c => ({ id:c.id, name:c.name, active:c.is_active, sort:c.sort_order });
 const sortStatCategories = () => STAT_CATEGORIES.sort((a,b)=>(a.sort-b.sort) || a.name.localeCompare(b.name));
 
@@ -3653,6 +3941,7 @@ const statCategoryName = id => (STAT_CATEGORIES.find(c=>c.id===id)||{}).name || 
 const statAppliesTo = d => d.clientId
   ? esc(clientOf(d.clientId).name || "Client")
   : esc(companyFullName(d.companyId))+' <span class="tiny muted">company-wide</span>';
+const statAppliesToText = d => d.clientId ? (clientOf(d.clientId).name || "Client") : companyFullName(d.companyId)+" (company-wide)";
 function statDbError(error, action){
   const msg = (error && error.message) || "";
   if(/jwt|expired|not authenticated/i.test(msg) || (error && error.status===401)) return "Your session has expired — sign in again.";
@@ -3662,38 +3951,124 @@ function statDbError(error, action){
   return "Could not "+action+" — "+msg;
 }
 VIEWS.calendar = {
-  title:"Statutory calendar", sub:()=>"Jobs the system raises on its own",
+  title:"Statutory calendar", sub:()=>"Job codes by statutory due date, and dates added by hand",
   render(){
     const can = CAN.manageStatutory();
-    // Next 60 days (today to +60): the compliance rows and the statutory dates
-    // added by hand, in one list by due date.
-    const inWindow = d => daysTo(d)>=0 && daysTo(d)<=60;
-    const rows = COMPLIANCE.filter(c=>inWindow(c.due)).map(c=>({ due:c.due, html:
-        '<tr><td>'+esc(c.name)+'<div class="code">'+esc(c.code)+'</div></td>'+
-        '<td>'+esc(clientOf(c.client).name)+'</td>'+
-        '<td class="num">'+fmtDate(c.due)+' '+dueTag(c.due)+'</td>'+
-        '<td class="r">'+(c.created?'<span class="tag ok">raised</span>'
-          :'<span class="tag">raises '+Math.max(0,daysTo(c.due)-20)+'d from now</span>')+'</td></tr>' }))
-      .concat(STATUTORY_DATES.filter(d=>inWindow(d.date)).map(d=>({ due:d.date, html:
-        '<tr><td><button class="text-link" onclick="openStatDate(\''+d.id+'\')">'+esc(d.title)+'</button>'+
-          '<div class="code">'+esc(statCategoryName(d.categoryId))+'</div></td>'+
-        '<td>'+statAppliesTo(d)+'</td>'+
-        '<td class="num">'+fmtDate(d.date)+' '+dueTag(d.date)+'</td>'+
-        '<td class="r"><span class="tag">added manually</span></td></tr>' })))
-      .sort((a,b)=>a.due<b.due?-1:a.due>b.due?1:0);
-    return '<div class="card"><div class="card-head"><h2>Next 60 days</h2><span class="spacer"></span>'+
-      '<span class="eyebrow">'+COMPLIANCE.filter(c=>c.created).length+' already raised</span>'+
-      (can?'<button class="btn sm" onclick="statDateForm()">+ Add Statutory Date</button>':'')+'</div>'+
-      (STATUTORY_ERROR
-        ? '<p class="tiny" style="color:var(--red);margin:-4px 0 10px">Statutory dates couldn\'t be loaded — '+esc(STATUTORY_ERROR)+
+    const b = statutoryJobBuckets(), m = statutoryDateBuckets();
+    const byDue = (x,y)=>x.due<y.due?-1:x.due>y.due?1:0;
+    const jobRow = j => ({ due:j.statDue, html:sdJobRow(j) });
+    // Overdue: job codes and dates added by hand. A date stays until marked done (041).
+    const overdue = b.overdue.map(jobRow).concat(m.overdue.map(d=>({ due:d.date, html:sdDateRow(d, can
+        ? '<button class="btn ghost sm" onclick="setStatDateDone(\''+d.id+'\',true)">Mark done</button>' : '') })))
+      .sort(byDue);
+    const dateRow = d => ({ due:d.date, html:sdDateRow(d) });
+    const dueToday = b.today.map(jobRow).concat(m.today.map(dateRow));
+    const dueNext7 = b.next7.map(jobRow).concat(m.next7.map(dateRow)).sort(byDue);
+    // Next 60 Days: dates added by hand due in 8 to 60 days, and the compliance
+    // rows. Job codes are listed by the 7-day rule, in the other cards.
+    const next60 = COMPLIANCE.filter(c=>statInWindow(c.due)).map(c=>({ due:c.due, html:sdRow({
+        name:esc(clientOf(c.client).name), nameTitle:clientOf(c.client).name, sub:c.name+" · "+c.code,
+        state:c.created?"Job raised":"No job raised", date:c.due, tag:dueTag(c.due) }) }))
+      .concat(m.upcoming.map(dateRow))
+      .sort(byDue);
+    return (STATUTORY_ERROR
+        ? '<p class="tiny" style="color:var(--red);margin:0 0 10px">Statutory dates couldn\'t be loaded — '+esc(STATUTORY_ERROR)+
           ' <button class="text-link" onclick="retryStatutory()">Try again</button></p>' : '')+
-      '<table><thead><tr><th>Obligation</th><th>Client</th><th>Statutory due</th><th class="r">Job code</th></tr></thead><tbody>'+
-      rows.map(r=>r.html).join("")+
-      '</tbody></table><p class="tiny muted" style="margin-top:12px">Each client subscribes to the obligations '+
-      'that apply to them. A nightly job raises the job code, sets the budget, assigns the usual team and '+
-      'creates the checklist — so nobody has to remember that GSTR-3B is due on the 20th.</p></div>';
+      '<div class="sd-grid">'+
+        sdCard("Overdue", "bad", overdue, "Nothing is overdue.")+
+        sdCard("Due Today", "warn", dueToday, "Nothing is due today.")+
+        sdCard("Next 7 Days", "info", dueNext7, "Nothing is due in the next 7 days.")+
+        sdCard("Next 60 Days", "", next60, "No dates added by hand due after the next 7 days.",
+          can?'<button class="btn sm" onclick="statDateForm()" title="Add a statutory date">+ Add Date</button>':'')+
+      '</div>'+
+      '<p class="sd-note">A job code appears once its statutory due date is within 7 days, and leaves when all its tasks are done or the job is closed. '+
+      'Dates added by hand appear up to 60 days ahead and stay under Overdue until marked done.</p>'+
+      (m.done.length
+        ? '<details class="card sd-done"><summary><span class="sd-done-title">Dates marked done</span> <span class="sd-count">'+m.done.length+'</span></summary>'+
+          '<div class="sd-list">'+m.done.map(d=>sdRow({ open:"openStatDate('"+d.id+"')", tone:"ok", name:statAppliesTo(d), nameTitle:statAppliesToText(d),
+            sub:d.title+" · "+statCategoryName(d.categoryId)+" · Manual", date:d.date,
+            tag:'<span class="tag ok">done '+fmtDate(d.completedAt.slice(0,10))+'</span>' })).join("")+'</div>'+
+          '<p class="sd-empty" style="padding-bottom:0">Dates due in the last 90 days or later. Open one to undo.</p></details>'
+        : '');
   }
 };
+
+const statInWindow = d => daysTo(d)>=0 && daysTo(d)<=60;
+/* Dates added by hand, each in exactly one list: overdue (however old, until
+   marked done), today, the next 7 days, or days 8 to 60. Done dates leave those
+   lists; ones due within the last 90 days or later are listed so "done" can be
+   undone. */
+function statutoryDateBuckets(){
+  const open = STATUTORY_DATES.filter(d=>!d.completedAt);
+  return {
+    overdue:  open.filter(d=>daysTo(d.date)<0).sort((a,b)=>a.date.localeCompare(b.date)),
+    today:    open.filter(d=>daysTo(d.date)===0),
+    next7:    open.filter(d=>daysTo(d.date)>=1 && daysTo(d.date)<=7),
+    upcoming: open.filter(d=>daysTo(d.date)>=8 && daysTo(d.date)<=60),
+    done:     STATUTORY_DATES.filter(d=>d.completedAt && daysTo(d.date)>=-90).sort((a,b)=>b.date.localeCompare(a.date))
+  };
+}
+async function setStatDateDone(id, done){
+  if(!CAN.manageStatutory()) return toast("Only Partners, Managers and Assistant Managers can manage statutory dates");
+  const { data, error } = await supabase.from("statutory_dates")
+    .update({ completed_at:done ? new Date().toISOString() : null, completed_by:done ? me : null })
+    .eq("id", id).select(SD_COLS).maybeSingle();
+  if(error) return toast(statDbError(error, "update this statutory date"));
+  if(!data) return toast("This statutory date no longer exists, or you no longer have access to it");
+  const i = STATUTORY_DATES.findIndex(x=>x.id===id);
+  if(i>=0) STATUTORY_DATES[i] = mapStatDate(data);
+  closeModal(); toast(done ? "Marked done" : "Marked not done"); render();
+}
+
+/* Job codes in the Statutory calendar: read straight from JOBS (what RLS let
+   this user load), never copied, so an edited date, a closed job or a reopened
+   job shows correctly on the next render. A closed job, or one with all its
+   tasks done (jobFinished), is not listed. Overhead codes and jobs with no
+   statutory date are left out. */
+function statutoryJobBuckets(){
+  const live = JOBS.filter(j=>!j.overhead && j.statDue && !jobFinished(j))
+    .sort((a,b)=>a.statDue.localeCompare(b.statDue) || a.code.localeCompare(b.code));
+  return {
+    overdue: live.filter(j=>daysTo(j.statDue)<0),
+    today:   live.filter(j=>daysTo(j.statDue)===0),
+    next7:   live.filter(j=>daysTo(j.statDue)>=1 && daysTo(j.statDue)<=7)
+  };
+}
+/* One compact card of the Statutory calendar. rows: [{ html }]. */
+function sdCard(title, tone, rows, emptyText, headExtra){
+  return '<section class="card sd-card"><div class="sd-head"><h2>'+title+'</h2>'+
+    '<span class="sd-count'+(rows.length&&tone?' '+tone:'')+'">'+rows.length+'</span><span class="spacer"></span>'+(headExtra||'')+'</div>'+
+    (rows.length ? '<div class="sd-list">'+rows.map(r=>r.html).join("")+'</div>' : '<p class="sd-empty">'+emptyText+'</p>')+'</section>';
+}
+const sdTone = d => { const n=daysTo(d); return n<0?"bad":n===0?"warn":n<=7?"info":"ok"; };
+/* One compact row. o: name (HTML), nameTitle, sub (plain text), state, date, tag
+   (HTML), and optionally open (click handler), tone, action (HTML). */
+function sdRow(o){
+  const inner = '<i class="sd-dot '+(o.tone||sdTone(o.date))+'"></i>'+
+    '<span class="sd-who"><span class="sd-line"><span class="sd-name" title="'+esc(o.nameTitle||"")+'">'+(o.name||"—")+'</span>'+
+      (o.state?'<span class="sd-state">'+esc(o.state)+'</span>':'')+'</span>'+
+      '<span class="sd-sub" title="'+esc(o.sub)+'">'+esc(o.sub)+'</span></span>'+
+    '<span class="sd-when"><span class="sd-date">'+fmtDate(o.date)+'</span>'+o.tag+'</span>';
+  return '<div class="sd-row">'+
+    (o.open ? '<button class="sd-main" onclick="'+o.open+'">'+inner+'</button>' : '<div class="sd-main">'+inner+'</div>')+
+    (o.action||'')+'</div>';
+}
+function sdJobRow(j){
+  const service = serviceName(j.service);
+  return sdRow({ open:"openStatJob('"+j.id+"')", name:esc(clientOf(j.client).name), nameTitle:clientOf(j.client).name,
+    sub:j.code+(service?" · "+service:""), state:STATUS_LABEL[j.status]||j.status, date:j.statDue, tag:dueTag(j.statDue) });
+}
+function sdDateRow(d, action){
+  return sdRow({ open:"openStatDate('"+d.id+"')", name:statAppliesTo(d), nameTitle:statAppliesToText(d),
+    sub:d.title+" · "+statCategoryName(d.categoryId)+" · Manual", date:d.date, tag:dueTag(d.date), action });
+}
+/* The app has no separate job screen: show the job's Job codes card, with its
+   usual buttons and each button's usual permission checks. */
+function openStatJob(jid){
+  const j = JOBS.find(x=>x.id===jid);
+  if(!j) return toast("That job code no longer exists");
+  modal(jobCardHTML(j)+'<div class="row"><button class="btn ghost" onclick="closeModal()">Close</button></div>', "wide");
+}
 
 /* Clients a statutory date can be attached to: the company's active clients
    (plus the date's current client, so editing never silently drops it). */
@@ -3776,7 +4151,7 @@ async function saveStatDate(id){
   const n = daysTo(row.date);
   closeModal();
   toast((id ? "Statutory date updated" : "Statutory date added")+
-    (n>60 ? " — it appears in Next 60 days from "+fmtDate(addDays(row.date,-60)) : n<0 ? " — it is past, so it is not listed in Next 60 days" : ""));
+    (n>60 ? " — it appears in Next 60 days from "+fmtDate(addDays(row.date,-60)) : n<0 && !row.completedAt ? " — it is past, so it is listed as overdue" : ""));
   render();
 }
 function openStatDate(id){
@@ -3787,12 +4162,14 @@ function openStatDate(id){
   modal('<h3>'+esc(d.title)+'</h3>'+
     '<p style="margin:-4px 0 10px"><span class="tag info">'+esc(statCategoryName(d.categoryId))+'</span> '+
       '<span class="tag">'+esc(companyFullName(d.companyId))+'</span></p>'+
-    '<p style="margin-bottom:6px"><strong>'+fmtDate(d.date)+'</strong> '+dueTag(d.date)+'</p>'+
+    '<p style="margin-bottom:6px"><strong>'+fmtDate(d.date)+'</strong> '+
+      (d.completedAt ? '<span class="tag ok">done on '+fmtDate(d.completedAt.slice(0,10))+'</span>' : dueTag(d.date))+'</p>'+
     '<p class="tiny" style="margin-bottom:6px">Client: '+(d.clientId ? esc(clientOf(d.clientId).name || "Client") : 'none (company-wide)')+'</p>'+
     (d.notes ? '<p class="tiny" style="white-space:pre-wrap;overflow-wrap:break-word;margin-bottom:6px">'+esc(d.notes)+'</p>' : '')+
     (by && by!=="—" ? '<p class="tiny muted" style="margin-bottom:12px">Added by '+esc(by)+'</p>' : '<div style="margin-bottom:12px"></div>')+
     '<div class="row"><button class="btn ghost" onclick="closeModal()">Close</button>'+
     (can ? '<button class="btn ghost" onclick="confirmDeleteStatDate(\''+d.id+'\')">Delete</button>'+
+           '<button class="btn ghost" onclick="setStatDateDone(\''+d.id+'\','+(d.completedAt?'false':'true')+')">'+(d.completedAt?'Mark not done':'Mark done')+'</button>'+
            '<button class="btn" onclick="statDateForm(\''+d.id+'\')">Edit</button>' : '')+'</div>');
 }
 function confirmDeleteStatDate(id){
@@ -3882,7 +4259,7 @@ async function deleteStatCategory(id){
 }
 
 /* =========================  ACTIONS  ============================= */
-function go(v){ closeMobileMenu(true); if(v==="salary"&&!CAN.viewSalary())return; jobsFilter="all"; view=v; window.scrollTo(0,0); if(v==="salary")loadSalaryMonth(); else render(); }
+function go(v){ closeMobileMenu(true); if(v==="salary"&&!CAN.viewSalary())return; jobsFilter="all"; jobsPartnerFilter="all"; view=v; window.scrollTo(0,0); if(v==="salary")loadSalaryMonth(); else render(); }
 
 /* --- time entry --- */
 async function quickAdd(){
@@ -3894,7 +4271,7 @@ async function quickAdd(){
   if(!h||h<=0) return toast("Enter the hours");
   if(!note) return toast("Say what you did — the approver reads this");
   const openDay = firstOpenDay(me,week);
-  if(day<6 && openDay!==null && day>openDay && !isSaturdayHoliday(date))
+  if(day<6 && openDay!==null && day>openDay && !isSaturdayHoliday(date) && !isOptionalWorkDay(date))
     return toast("Log "+DAY_NAMES[openDay]+" first — working days must be filled in order");
   if(!CAN.exceedJobBudget() && h > jobRemainingHours(jid)) return budgetBlocked(jid, h);
   const { data, error } = await supabase.from("timesheet_entries").insert({
@@ -3907,7 +4284,6 @@ async function quickAdd(){
   if(error) return toast("Could not save — "+error.message);
   TIMESHEET_WEEK=week;
   TIMESHEET_DATE=date;
-  if(date<=TODAY && holidayOn(date) && !holidayWorkedOn(me,date)) HOLIDAY_WORKED.push({who:me,date});
   ENTRIES.push({ id:data.id, who:me, week, date, job:jid, taskId, day, hours:h, note, status:"draft", query:"" });
   toast(hrs(h)+"h added to "+job(jid).code);
   render();
@@ -3919,6 +4295,7 @@ function setTimesheetDate(date){
   render();
 }
 function logTo(jid){
+  closeModal();       // also used from the job pop-up in the Statutory calendar
   go("mytime");
   setTimeout(()=>{ const s=$("#qJob"); if(s){ s.value=jid; refreshTaskOptions(); $("#qHrs").focus(); } },40);
 }
@@ -3947,6 +4324,10 @@ async function submitSheet(){
   if(missing.length) return toast(missing.length+" entr"+(missing.length===1?"y needs":"ies need")+" a narration");
 
   const toSubmit = rows.filter(r=>r.status==="draft"||r.status==="queried");
+  // Minimum hours per day (re-checked by trg_timesheet_day_minimum, 045).
+  const short = daysBelowMinimum(me, toSubmit);
+  if(short.length) return toast(short.map(x=>fmtShort(x.date)+": "+hrs(x.total)+"h of "+x.min+"h").join(" · ")+
+    " — a full day needs "+MIN_FULL_DAY_HOURS+"h. Worked half a day? Tick Half day (minimum "+MIN_HALF_DAY_HOURS+"h).");
   const nextStatus = CAN.selfCertify() ? "approved" : "pending";
   const { error } = await supabase.from("timesheet_entries")
     .update({ status:nextStatus, query_reason:"" }).in("id", toSubmit.map(r=>r.id));
@@ -3958,9 +4339,10 @@ async function submitSheet(){
   render();
 }
 
-/* Approving an entry that names a task marks that task Done in the database
-   (trg_timesheet_task_approved, same transaction as the approval). Re-read
-   just those tasks so the Work screen shows what was actually committed. */
+/* Approving time can mark the named task Done, and undoing can reopen it, in
+   the database (trg_timesheet_task_approved, 040, same transaction; its rules
+   are there). Re-read just those tasks so the Work screen shows what was
+   actually committed. */
 async function reloadLinkedTasks(rows){
   const ids=[...new Set(rows.map(r=>r.taskId).filter(Boolean))];
   if(!ids.length) return;
@@ -4002,6 +4384,7 @@ async function undoLine(who,jid){
     .update({ status:"pending", query_reason:"", decided_by:null, decided_at:null }).in("id", rows.map(r=>r.id));
   if(error) return toast("Could not undo — "+error.message);
   rows.forEach(x=>{ x.status="pending"; x.query=""; x.decidedBy=null; x.decidedAt=null; });
+  await reloadLinkedTasks(rows);
   render();
 }
 
@@ -4395,8 +4778,11 @@ async function submitLeaveForm(){
   const reason = $("#lvReason").value.trim();
   if(!start) return toast("Choose a start date");
   if(end < start) return toast("End date can't be before the start date");
-  const dates = datesBetween(start, end);
-  if(half && dates.length > 1) return toast("Half day only applies to a single date — set the same start and end date");
+  const range = datesBetween(start, end);
+  if(half && range.length > 1) return toast("Half day only applies to a single date — set the same start and end date");
+  // Saturdays and holidays are optional working days — no leave is needed for them.
+  const dates = range.filter(d=>!isOptionalWorkDay(d));
+  if(!dates.length) return toast("Saturdays and holidays are optional working days — no leave is needed");
   if(!reason) return toast("Give a reason for the leave");
 
   // Friendly pre-check — the DB's UNIQUE(profile_id, leave_date) catches this
@@ -4762,6 +5148,7 @@ async function recordPunch(type, siteId, lat, lng, accuracy){
   // appear there until the month picker was touched again.
   if(MY_MONTH.month===TODAY.slice(0,7)) MY_MONTH.rows.push(rec);
   render();
+  afterPunchRecorded(type);
   const r=$("#punchResult");
   if(r) r.innerHTML = stampHTML(rec) + (ok?"":
     '<p class="tiny muted" style="margin-top:6px">Recorded and flagged for review — nothing is ever rejected.</p>');
@@ -4920,6 +5307,7 @@ async function confirmOtherPlacePunch(){
   refreshMyPunches();
   if(MY_MONTH.month===TODAY.slice(0,7)) MY_MONTH.rows.push(rec);
   render();
+  afterPunchRecorded(op.type);
   const r=$("#punchResult");
   if(r) r.innerHTML = stampHTML(rec);
 }
@@ -5062,6 +5450,145 @@ async function saveService(){
   toast(row.name+" added");
 }
 
+/* =====================  RESPONSIBLE PARTNER (per job code, 042)  ===================== */
+/* A client keeps ONE Relationship Partner (clients.relationship_partner_id —
+   client ownership, edited only on the client). Each job code has its own
+   Responsible Partner (jobs.responsible_partner_id): any active Partner of the
+   organization. It defaults to the client's Relationship Partner when that
+   person is an active Partner (the client field also accepts AM / Manager).
+   Changing it never touches the client. The database enforces the same rules
+   (trg_jobs_responsible_partner) and e-mails the partners (job_partner_changed).
+   Partners come from org_partners(): profiles RLS hides other-company partners
+   from non-partners, which would leave names blank. */
+let ORG_PARTNERS = [], ORG_PARTNERS_ERROR = "";
+async function loadOrgPartners(){
+  const org = ORG_ID;
+  ORG_PARTNERS = []; ORG_PARTNERS_ERROR = "";
+  if(!org) return;
+  const { data, error } = await supabase.rpc("org_partners");
+  if(org !== ORG_ID) return;   // signed out / switched account meanwhile
+  if(error){
+    console.error("[PARTNERS] org_partners() failed — run supabase/migrations/042_job_responsible_partner.sql.", error);
+    ORG_PARTNERS_ERROR = error.message || "unknown error";
+    // Fall back to the partners this user can see directly.
+    ORG_PARTNERS = ALL_PEOPLE.filter(p=>p.role==="partner" && !p.deleted)
+      .map(p=>({ id:p.id, name:p.name, companyId:p.companyId, active:p.active }));
+    return;
+  }
+  ORG_PARTNERS = (data||[]).map(p=>({ id:p.id, name:p.full_name, companyId:p.company_id, active:!!p.is_active }));
+}
+const activeJobPartners = () => ORG_PARTNERS.filter(p=>p.active).sort((a,b)=>a.name.localeCompare(b.name));
+const isActiveJobPartner = id => !!id && activeJobPartners().some(p=>p.id===id);
+const partnerName = id => {
+  if(!id) return "";
+  const p = ORG_PARTNERS.find(x=>x.id===id);
+  if(p) return p.name + (p.active ? "" : " (inactive)");
+  const q = person(id); return q.name!=="—" ? q.name : "";
+};
+/* The client's Relationship Partner when they are an active Partner, else null. */
+const defaultJobPartner = clientId => { const rp = clientOf(clientId).partner; return isActiveJobPartner(rp) ? rp : null; };
+const jobPartnerOptions = (selected, exclude) =>
+  activeJobPartners().filter(p=>p.id!==exclude).map(p=>'<option value="'+p.id+'"'+(p.id===selected?" selected":"")+'>'+
+    esc(p.name)+(COMPANIES.length>1 && p.companyId ? ' — '+esc(companyFullName(p.companyId)) : '')+'</option>').join("");
+
+/* New job form: the Responsible Partner field for the chosen client. */
+function njPartnerFieldHTML(clientId){
+  const def = defaultJobPartner(clientId);
+  const company = clientOf(clientId).companyId || HOME_COMPANY_ID;
+  // Without a default anyone who may raise the job has to name a partner.
+  const locked = !!def && !CAN.setJobPartner(company);
+  const rp = clientOf(clientId).partner;
+  return '<label class="field"><span>Responsible Partner *</span><select id="njPartner"'+(locked?' disabled':'')+
+      ' onchange="this.dataset.touched=1">'+
+      (def ? '' : '<option value="">Choose a partner…</option>')+jobPartnerOptions(def)+'</select></label>'+
+    '<p class="tiny muted" style="margin:-6px 0 10px">'+
+      (rp ? 'Client\'s relationship partner: '+esc(person(rp).name!=="—" ? person(rp).name : partnerName(rp))+
+            (def ? ' (the default)' : ' — not a Partner, so choose who is responsible for this job')
+          : 'This client has no relationship partner — choose who is responsible for this job')+
+      (locked ? '. Only a Partner, or a Manager for their own company, can choose someone else.' : '.')+
+      ' This applies to this job only; the client is not changed.</p>';
+}
+/* Client changed on the new-job form: re-default the partner unless the user picked one. */
+function njClientChanged(){
+  suggestCode();
+  const sel = $("#njPartner");
+  if(sel && sel.dataset.touched) return;
+  const wrap = $("#njPartnerWrap");
+  if(wrap) wrap.innerHTML = njPartnerFieldHTML($("#njClient").value);
+}
+
+/* Change Responsible Partner: current → choose → confirm → save that one field.
+   Opened from the job card, or from the Edit job form (whose unsaved values
+   are put back afterwards). */
+let jpState = null;
+function changeJobPartner(jid, fromEdit){
+  const j = job(jid);
+  if(!j.id) return;
+  if(!CAN.setJobPartner(j.companyId)) return toast("Only a Partner, or a Manager for their own company's jobs, can change the responsible partner");
+  const back = fromEdit ? [...document.querySelectorAll("#modal input[id], #modal select[id]")]
+    .map(el=>[el.id, el.value, el.dataset.touched||""]) : null;
+  jpState = { jid, back, pick:"" };
+  jpChooseStep();
+}
+function jpHeader(j){
+  const rp = clientOf(j.client).partner;
+  return '<p class="tiny muted" style="margin:-4px 0 12px"><span class="code">'+esc(j.code)+'</span> — '+esc(j.title)+
+    (clientOf(j.client).name ? ' · '+esc(clientOf(j.client).name) : '')+'</p>'+
+    '<table style="margin-bottom:12px"><tbody>'+
+    '<tr><td class="tiny muted">Current responsible partner</td><td class="strong">'+(j.partner ? esc(partnerName(j.partner)) : '<span class="muted">None</span>')+'</td></tr>'+
+    '<tr><td class="tiny muted">Client\'s relationship partner</td><td>'+(rp ? esc(person(rp).name!=="—" ? person(rp).name : partnerName(rp)) : '—')+
+      ' <span class="tiny muted">(not changed)</span></td></tr></tbody></table>';
+}
+function jpChooseStep(){
+  const j = job(jpState.jid);
+  const opts = jobPartnerOptions(jpState.pick, j.partner);
+  modal('<h3>Change Responsible Partner</h3>'+jpHeader(j)+
+    (opts
+      ? '<label class="field"><span>New responsible partner</span><select id="jpNew">'+
+          '<option value="">Choose a partner…</option>'+opts+'</select></label>'
+      : '<p class="tiny muted">There is no other active Partner to choose.</p>')+
+    '<div class="row"><button class="btn ghost" onclick="jpBack()">'+(jpState.back?'Back':'Cancel')+'</button>'+
+    (opts ? '<button class="btn" onclick="jpConfirmStep()">Continue</button>' : '')+'</div>');
+}
+function jpConfirmStep(){
+  const pick = $("#jpNew") ? $("#jpNew").value : "";
+  if(!pick) return toast("Choose the new responsible partner");
+  jpState.pick = pick;
+  const j = job(jpState.jid), c = clientOf(j.client);
+  modal('<h3>Confirm change</h3>'+
+    '<p style="margin:0 0 10px">Change the responsible partner of <span class="code">'+esc(j.code)+'</span> from <strong>'+
+      (j.partner ? esc(partnerName(j.partner)) : 'nobody')+'</strong> to <strong>'+esc(partnerName(pick))+'</strong>?</p>'+
+    '<p class="tiny muted">Only this job changes. '+(c.name ? esc(c.name)+'\'s relationship partner and other jobs stay as they are. ' : '')+
+      'Both partners are notified by e-mail, and job e-mails go to the new partner from now on.</p>'+
+    '<div class="row"><button class="btn ghost" onclick="jpChooseStep()">Back</button>'+
+    '<button class="btn" id="jpSave" onclick="saveJobPartner()">Confirm change</button></div>');
+}
+async function saveJobPartner(){
+  const btn = $("#jpSave"); if(btn.disabled) return; btn.disabled = true;
+  const j = job(jpState.jid), pick = jpState.pick;
+  const { data, error } = await supabase.from("jobs").update({ responsible_partner_id:pick })
+    .eq("id", j.id).select("id,responsible_partner_id").maybeSingle();
+  btn.disabled = false;
+  if(error) return toast("Could not change the responsible partner — "+error.message);
+  if(!data) return toast("Could not change the responsible partner — you do not have permission to edit this job");
+  j.partner = data.responsible_partner_id;
+  toast(j.code+" — responsible partner is now "+partnerName(j.partner));
+  jpBack(true);
+}
+function jpBack(saved){
+  const st = jpState; jpState = null;
+  if(st && st.back){
+    newJob(st.jid);
+    st.back.forEach(([id, v, t])=>{
+      if(id==="jpNew") return;
+      const el = document.getElementById(id); if(!el) return;
+      el.value = v; if(t) el.dataset.touched = t;
+    });
+    return;
+  }
+  closeModal(); if(saved) render();
+}
+
 function currentFY(){
   const [y,m] = TODAY.split("-").map(Number);
   const startY = m>=4 ? y : y-1;                  // Indian FY starts 1 April
@@ -5094,7 +5621,18 @@ function newJob(jid){
   if(j && j.service && !services.some(s=>s.code===j.service)) services.unshift({ code:j.service, name:j.service });
   svcPick = { list:services, hits:[], at:0, suggest:!j };
   const svcCode = j ? (j.service||"") : (services[0] ? services[0].code : "");
-  const suggest = j ? '' : ' onchange="suggestCode()"';
+  const suggest = j ? '' : ' onchange="njClientChanged()"';
+  // Responsible Partner (042): chosen on a new job; on an existing job it is
+  // shown here and changed only through "Change Responsible Partner".
+  const partnerField = j
+    ? '<div class="field"><span>Responsible Partner</span>'+
+        '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
+          (j.partner ? '<strong>'+esc(partnerName(j.partner))+'</strong>' : '<span class="tag warn">Not set</span>')+
+          (CAN.setJobPartner(j.companyId)
+            ? '<button type="button" class="btn ghost sm" onclick="changeJobPartner(\''+j.id+'\',true)">Change Responsible Partner</button>'
+            : '<span class="tiny muted">Only a Partner, or a Manager for their own company, can change it.</span>')+
+        '</div></div>'
+    : '<div id="njPartnerWrap">'+njPartnerFieldHTML(clientList[0] ? clientList[0].id : "")+'</div>';
   const companyField = j && managesAllCompanies() && COMPANIES.length > 1
     ? '<label class="field"><span>Company</span><select id="njCompany">'+
         COMPANIES.filter(c=>c.active || c.id===j.companyId).map(c=>'<option value="'+c.id+'"'+sel(c.id,j.companyId)+'>'+
@@ -5125,6 +5663,7 @@ function newJob(jid){
           '<button type="button" class="btn sm" id="nsSave" onclick="saveService()">Save service</button></div>'+
         '</div>' : '')+
     '</div></div>'+
+    partnerField+
     '<div class="grid g2" style="gap:10px">'+
     '<label class="field"><span>Period / FY</span>'+
       '<input type="text" id="njPeriod" value="'+esc(j ? j.period : currentFY())+'"'+(j ? '' : ' oninput="suggestCode()"')+'></label>'+
@@ -5160,6 +5699,16 @@ async function saveJob(editId){
   if(!title) return toast("Give the job a title");
   if(!budgetRaw) return toast("Enter the budgeted hours");
   if(!(budget>0)) return toast("Budgeted hours must be more than 0");
+  // Responsible Partner (new jobs only; 042). The database re-checks all of this.
+  const partnerSel = editId ? null : $("#njPartner");
+  const partnerId = partnerSel ? partnerSel.value : "";
+  if(!editId){
+    if(!partnerId) return toast("Choose the responsible partner for this job");
+    if(!isActiveJobPartner(partnerId)) return toast("The responsible partner must be an active Partner");
+    const def = defaultJobPartner(clientId);
+    if(def && partnerId!==def && !CAN.setJobPartner(clientOf(clientId).companyId||HOME_COMPANY_ID))
+      return toast("Only a Partner, or a Manager for their own company, can choose a different responsible partner");
+  }
   // One save at a time: a second click while the first is in flight is ignored.
   const btn=$("#njSave"); if(btn.disabled) return; btn.disabled=true;
   if(editId){ await updateJob(editId, { code, title, budget, due, statDue, clientId, service, period }); btn.disabled=false; return; }
@@ -5170,12 +5719,14 @@ async function saveJob(editId){
     budget_hours:budget, internal_due_date:due, statutory_due_date:statDue,
     // A job belongs to its client's company (the DB trigger, 028, derives the
     // same when company_id is omitted).
-    is_overhead:false, opened_by:me, opened_on:TODAY, company_id:clientOf(clientId).companyId||HOME_COMPANY_ID
+    is_overhead:false, opened_by:me, opened_on:TODAY, company_id:clientOf(clientId).companyId||HOME_COMPANY_ID,
+    responsible_partner_id:partnerId
   }).select().single();
   btn.disabled=false;
   if(error) return toast("Could not raise the job code — "+error.message);
   JOBS.push({ id:data.id, code, title, client:clientId, status:"open",
-    budget, due, statDue, overhead:false, openedBy:me, openedOn:TODAY, companyId:data.company_id });
+    budget, due, statDue, overhead:false, openedBy:me, openedOn:TODAY, companyId:data.company_id,
+    service, period:period||"", partner:data.responsible_partner_id||null });
   closeModal(); toast("Raised "+code); go("jobs");
 }
 
@@ -5309,7 +5860,7 @@ function monthShift(n){
 function tasksOn(who,date){ return TASKS.filter(t=>t.who===who && t.due===date); }
 function jobsDueOn(who,date){
   const mine=new Set(ENTRIES.filter(x=>x.who===who).map(x=>x.job));
-  return JOBS.filter(j=>!j.overhead && j.due===date && mine.has(j.id));
+  return JOBS.filter(j=>!j.overhead && !jobFinished(j) && j.due===date && mine.has(j.id));
 }
 
 /* ---- Personal events (033_personal_events.sql) ----------------------------
@@ -5515,7 +6066,8 @@ VIEWS.mycal = {
         (holName?'<span class="tag warn">'+esc(holName)+'</span>':'')+
         (lv?'<span class="tag ok">'+esc(leaveTypeLabel(lv.type))+(lv.part!=="full"?" (half day)":"")+'</span>':'')+'</div>'+
         '<div class="cal-detail-body">';
-      if(holName) h+='<p class="tiny" style="margin-bottom:4px"><strong>Holiday:</strong> '+esc(holName)+'</p>';
+      if(holName) h+='<p class="tiny" style="margin-bottom:4px"><strong>Holiday:</strong> '+esc(holName)+
+        (hol && hol.description ? ' — <span class="muted">'+esc(hol.description)+'</span>' : '')+'</p>';
       if(lv) h+='<p class="tiny" style="margin-bottom:4px"><strong>Leave:</strong> '+esc(leaveTypeLabel(lv.type))+
         (lv.part!=="full"?" — half day":"")+'</p>';
       h+=(ts.length||jd.length)
@@ -5543,6 +6095,9 @@ VIEWS.mycal = {
       h+='<button class="btn ghost sm" style="margin-top:8px" onclick="personalEventForm(null,\''+calSel+'\')">+ Add personal event</button>';
       h+='</div></div>';
     }
+
+    /* organization-wide holidays of the year on screen (043) */
+    h+=holidaysCardHTML(calMonth.slice(0,4));
 
     /* past submissions */
     const wks=weeksFor(me);
@@ -5583,8 +6138,14 @@ function repRows(){
 }
 function setRep(k,v){ if(k==="from")repFrom=v; if(k==="to")repTo=v; if(k==="who")repWho=v; render(); }
 
+/* The client's Relationship Partner by name (client ownership — 042 keeps it
+   apart from the job's Responsible Partner). */
+const clientRelPartnerName = clientId => {
+  const rp = clientOf(clientId).partner;
+  return rp ? (person(rp).name!=="—" ? person(rp).name : partnerName(rp)) : "";
+};
 function sheetAssignment(){
-  const rows=[["Job code","Client","Title","Status","Budgeted hrs","Additional approved hrs","Total available hrs",
+  const rows=[["Job code","Client","Responsible partner","Client relationship partner","Title","Status","Budgeted hrs","Additional approved hrs","Total available hrs",
     "Actual hrs","Variance hrs","Consumed %",
     ...GRADES().map(g=>g+" hrs"),"Chargeable","Internal due"]];
   JOBS.filter(j=>!j.overhead).forEach(j=>{
@@ -5592,14 +6153,16 @@ function sheetAssignment(){
     const tot=sum(rs.map(x=>+x.hours||0));
     const by=g=>sum(rs.filter(x=>person(x.who).label===g).map(x=>+x.hours||0));
     const extra=jobExtraHours(j.id), avail=jobBudgetTotal(j.id);
-    rows.push([j.code, clientOf(j.client).name, j.title, STATUS_LABEL[j.status]||j.status,
+    rows.push([j.code, clientOf(j.client).name, partnerName(j.partner), clientRelPartnerName(j.client), j.title, STATUS_LABEL[j.status]||j.status,
       j.budget||0, extra, avail, +tot.toFixed(2), +(avail-tot).toFixed(2),
       avail?+(tot/avail).toFixed(4):0,
       ...GRADES().map(by), "Yes", j.due||""]);
   });
   JOBS.filter(j=>j.overhead).forEach(j=>{
     const tot=sum(repRows().filter(x=>x.job===j.id).map(x=>+x.hours||0));
-    rows.push([j.code,"—",j.title,"Open","","","","",+tot.toFixed(2),"","","","","","No",""]);
+    // Same columns as the header: hours under "Actual hrs", one blank per designation.
+    rows.push([j.code,"—",partnerName(j.partner),"—",j.title,"Open","","","",+tot.toFixed(2),"","",
+      ...GRADES().map(()=>""),"No",""]);
   });
   return rows;
 }
@@ -5634,11 +6197,11 @@ function sheetDaywise(){
 }
 
 function sheetTasks(){
-  const rows=[["Job code","Client","Task","Assigned to","Grade","Status","Due date","Days to due","Est. hours"]];
+  const rows=[["Job code","Client","Responsible partner","Task","Assigned to","Grade","Status","Due date","Days to due","Est. hours"]];
   const list = repWho==="all" ? TASKS : TASKS.filter(t=>t.who===repWho);
   list.forEach(t=>{
     const j=job(t.job);
-    rows.push([j.code, clientOf(j.client).name, t.title, person(t.who).name, person(t.who).label,
+    rows.push([j.code, clientOf(j.client).name, partnerName(j.partner), t.title, person(t.who).name, person(t.who).label,
       STATUS_LABEL[t.status], t.due, daysTo(t.due), t.est||0]);
   });
   return rows;
@@ -5825,8 +6388,9 @@ VIEWS.reports = {
     h+='<div class="card"><div class="card-head"><h2>2. Assignment-wise Report</h2><span class="spacer"></span>'+
       '<button class="btn" onclick="exportReportAssignment()">Download Report</button></div>'+
       '<p class="tiny muted" style="margin-bottom:12px">Job code breakdown with budgeted hours, actual booked hours, variance, '+
-      'percentage used, and hours logged by each designation.</p>'+
-      '<table><thead><tr><th>Job code</th><th class="r">Budgeted</th><th class="r">Additional</th><th class="r">Actual</th>'+
+      'percentage used, hours logged by each designation, and the job\'s responsible partner '+
+      '(the Excel file also lists the client\'s relationship partner).</p>'+
+      '<table><thead><tr><th>Job code</th><th>Responsible partner</th><th class="r">Budgeted</th><th class="r">Additional</th><th class="r">Actual</th>'+
       '<th class="r">Variance</th><th class="r">Used</th>'+
       GRADES().map(g=>'<th class="r">'+g+'</th>').join("")+'</tr></thead><tbody>'+
       JOBS.filter(j=>!j.overhead).map(j=>{
@@ -5835,6 +6399,7 @@ VIEWS.reports = {
         const by=g=>sum(r.filter(x=>person(x.who).label===g).map(x=>+x.hours||0));
         const extra=jobExtraHours(j.id), avail=jobBudgetTotal(j.id), pct=avail?t/avail*100:0;
         return '<tr><td><span class="code">'+esc(j.code)+'</span></td>'+
+          '<td class="tiny">'+(j.partner ? esc(partnerName(j.partner)) : '<span class="muted">—</span>')+'</td>'+
           '<td class="r num">'+hrs(j.budget)+'</td>'+
           '<td class="r num '+(extra?"":"muted")+'">'+(extra?"+"+hrs(extra):"—")+'</td><td class="r num strong">'+hrs(t)+'</td>'+
           '<td class="r num">'+((avail-t)>=0?"":"−")+hrs(Math.abs(avail-t))+'</td>'+
@@ -5898,7 +6463,7 @@ VIEWS.reports = {
             return '<tr><td class="wrap">'+esc(t.title)+'</td><td><span class="code">'+esc(j.code)+'</span></td>'+
               '<td>'+esc(person(t.who).name)+'</td>'+
               '<td><span class="tag">'+STATUS_LABEL[t.status]+'</span></td>'+
-              '<td>'+dueTag(t.due)+'</td><td class="r num">'+hrs(t.est)+'h</td></tr>';
+              '<td>'+taskDueTag(t)+'</td><td class="r num">'+hrs(t.est)+'h</td></tr>';
           }).join("")+
           '</tbody></table>'+
           (taskList.length>8?'<p class="tiny muted" style="margin-top:8px">Showing 8 of '+taskList.length+' tasks. Download Report for full register.</p>':'')
@@ -6135,7 +6700,7 @@ VIEWS.people = {
           '<div class="tiny muted">'+esc(p.email||"")+'</div></td>'+
         '<td class="num tiny">'+esc(p.code||"—")+'</td>'+
         '<td><span class="tag info">'+esc(personCompanyName(p))+'</span></td>'+
-        '<td><span class="tag">'+p.label+'</span></td>'+
+        '<td><span class="tag">'+esc(desigName(p))+'</span></td>'+
         '<td class="tiny">'+(p.reportsTo?esc(person(p.reportsTo).name):'<span class="muted">— self-certifies</span>')+'</td>'+
         '<td class="r num">'+(p.ctc?money(p.ctc):"—")+'</td>'+
         '<td class="r num">'+(p.cost?money(p.cost):"—")+'</td>'+
@@ -6170,7 +6735,7 @@ function treeRow(id, depth){
   const pend=sheetStatus(id)==="submitted"?' <span class="tag warn">timesheet waiting</span>':'';
   return '<tr><td style="padding-left:'+(depth*22)+'px">'+
     (depth?'<span class="muted">└ </span>':'')+esc(p.name)+
-    ' <span class="tiny muted">'+p.label+'</span>'+pend+'</td>'+
+    ' <span class="tiny muted">'+esc(desigName(p))+'</span>'+pend+'</td>'+
     '<td class="r tiny muted">'+(kids.length?kids.length+" report"+(kids.length>1?"s":""):"")+'</td></tr>'+
     kids.map(k=>treeRow(k.id,depth+1)).join("");
 }
@@ -6217,8 +6782,7 @@ function personForm(p){
       : '')+
     '<div class="grid g2" style="gap:10px">'+
     '<label class="field"><span>Designation</span><select id="pfRole">'+
-      (ASSIGNABLE_ROLES.includes(p.role) ? '' : '<option value="'+esc(p.role)+'" selected>'+esc(ROLE_LABEL[p.role]||p.role)+' (legacy)</option>')+
-      ASSIGNABLE_ROLES.map(r=>'<option value="'+r+'"'+(r===p.role?" selected":"")+'>'+ROLE_LABEL[r]+'</option>').join("")+
+      designationOptionsHTML(p)+   // managed designations (044); the fixed list before 044
     '</select></label>'+
     '<label class="field"><span>Reports to</span><select id="pfBoss">'+
       '<option value="">— nobody (self-certifies)</option>'+
@@ -6250,7 +6814,10 @@ function editPerson(id){
 async function savePerson(id){
   if(!CAN.manageTeam()) return toast("Only a partner can change the team");
   const name=$("#pfName").value.trim();
-  const role=$("#pfRole").value;
+  // Designation (044): the chosen title and the access level it carries.
+  const desig=parseDesignationChoice($("#pfRole").value);
+  if(!desig) return toast("Choose a designation");
+  const role=desig.role, designationId=desig.designationId;
   const boss=$("#pfBoss").value||null;
   const code=$("#pfCode").value.trim();
   const companyId=$("#pfCompany") ? $("#pfCompany").value : "";
@@ -6272,7 +6839,8 @@ async function savePerson(id){
     const effective=($("#pfEffective") && $("#pfEffective").value) || TODAY;
     if(!validISODate(effective)) return pfShowError("Choose a valid effective date");
     const company=selectedCompany.code;
-    if(p.id===me && role!==p.role) return toast("You cannot change your own designation — ask another partner");
+    if(p.id===me && (role!==p.role || (designationId && designationId!==p.designationId)))
+      return toast("You cannot change your own designation — ask another partner");
     if(p.role==="partner" && role!=="partner" && activePartners()<=1)
       return toast("The firm would be left without a partner to approve anything");
     const updatePayload = {
@@ -6280,6 +6848,8 @@ async function savePerson(id){
       reports_to:boss, joining_date:joined, cost_per_hour:cost, bill_rate_per_hour:bill,
       company, company_id:companyId
     };
+    // The database derives role from the designation (trg_profiles_designation_sync).
+    if(designationId) updatePayload.designation_id = designationId;
     const { error } = await supabase.from("profiles").update(updatePayload).eq("id", id);
     if(error) return toast("Could not save — "+error.message);
     // A new company and/or CTC starts a new salary record from the effective
@@ -6300,6 +6870,10 @@ async function savePerson(id){
     if(companyChanged){ await reloadAppData(); return; }
     Object.assign(p,{ name, code, email, role, label:ROLE_LABEL[role], reportsTo:boss,
       joined, cost, bill, company, companyId, ctc:salaryAt(id,TODAY) });
+    if(designationsReady()){
+      const d = designationId ? DESIG_LIST.find(x=>x.id===designationId) : builtinDesignation(role);
+      p.designationId = d ? d.id : null; p.designation = d ? d.name : "";
+    }
     if(p.id===me) saveIdentityCache();
     return render();
   }
@@ -6340,10 +6914,20 @@ async function savePerson(id){
   }
   SALARY_HISTORY.push({id:salaryRow.id,who:prof.id,ctc:+salaryRow.monthly_ctc,effective:salaryRow.effective_from,companyId:salaryRow.company_id});
 
+  // create-employee only knows the access level, so the profile starts on that
+  // level's standard designation; a custom one is set right after (044).
+  let desigNote="";
+  let finalDesig = designationsReady() ? builtinDesignation(role) : null;
+  if(designationId && (!finalDesig || finalDesig.id!==designationId)){
+    const set = await setProfileDesignation(prof.id, designationId);
+    if(set.ok) finalDesig = DESIG_LIST.find(x=>x.id===designationId) || finalDesig;
+    else desigNote=" Their designation could not be set to "+desig.name+" ("+set.message+") — edit them to set it.";
+  }
   PEOPLE.push({ id:prof.id, code, name, email, role, label:ROLE_LABEL[role], reportsTo:boss,
-    joined, cost, bill, company:prof.company||assignedCompany?.code||"", companyId:prof.company_id, ctc, active:true, authUserId:prof.auth_user_id });
+    joined, cost, bill, company:prof.company||assignedCompany?.code||"", companyId:prof.company_id, ctc, active:true, authUserId:prof.auth_user_id,
+    designationId:finalDesig?finalDesig.id:null, designation:finalDesig?finalDesig.name:"" });
   closeModal();
-  toast(name+" added to "+companyFullName(prof.company_id)+" — they can sign in with the email and password you set");
+  toast(name+" added to "+companyFullName(prof.company_id)+" — they can sign in with the email and password you set."+desigNote);
   render();
 }
 
@@ -6467,7 +7051,7 @@ VIEWS.clients = {
            '<button class="btn" onclick="newClient()">Add client</button>'
          :'<span class="tiny muted">Assistant Manager and above can add clients.</span>')+'</div>'+
       '<table><thead><tr><th>Code</th><th>Client</th><th>Type</th><th>PAN</th><th>GSTIN</th>'+
-      '<th>Partner</th><th class="r">Jobs</th><th class="r"></th></tr></thead><tbody>';
+      '<th>Relationship partner</th><th class="r">Jobs</th><th class="r"></th></tr></thead><tbody>';
 
     h+=CLIENTS.length ? CLIENTS.map(c=>{
       const jobs=JOBS.filter(j=>j.client===c.id);
@@ -6745,14 +7329,14 @@ VIEWS.profile = {
     let h='<div class="card"><div class="pf-head">'+
       '<div class="pf-avatar" aria-hidden="true">'+esc(initialsOf(r.full_name))+'</div>'+
       '<div style="min-width:0"><h2 style="overflow-wrap:anywhere">'+esc(r.full_name)+'</h2>'+
-      '<div class="tiny muted">'+esc(ROLE_LABEL[r.role]||r.role)+(PROFILE.company?' · '+esc(PROFILE.company.name):'')+'</div>'+
+      '<div class="tiny muted">'+esc(profileDesignation(r))+(PROFILE.company?' · '+esc(PROFILE.company.name):'')+'</div>'+
       '<div style="margin-top:6px"><span class="tag '+(r.is_active?"ok":"bad")+'">'+(r.is_active?"active":"inactive")+'</span></div></div></div>';
 
     h+='<div class="pf-grid">'+
       field("Sign-in email", PROFILE.email)+
       (r.contact_email && r.contact_email.toLowerCase()!==String(PROFILE.email).toLowerCase() ? field("Contact email", r.contact_email) : "")+
       field("Employee ID", r.employee_code)+
-      field("Designation", ROLE_LABEL[r.role]||r.role)+
+      field("Designation", profileDesignation(r))+
       field("Company", PROFILE.company ? PROFILE.company.name : (r.company||""))+
       field("Organization", FIRM.name)+
       field("Reports to", boss && boss!=="—" ? boss : "")+
@@ -6887,14 +7471,262 @@ async function changeMyPassword(ev){
   return false;
 }
 
+/* =====================  HOLIDAYS (organization-wide, 043)  ===================== */
+/* One list per organization, shown in every employee's calendar whatever their
+   company (holidays_select, 036). Partners add / edit / delete. A holiday dated
+   today or earlier cannot be added, moved or deleted — attendance and earned
+   leave for it are already settled — but its name and description can still be
+   corrected. The database enforces the same (trg_guard_holiday_change). */
+function mapHoliday(h){ return { id:h.id, date:h.holiday_date, name:h.name, description:h.description||"" }; }
+const holidayLocked = h => !!h && h.date <= TODAY;
+function holidaysCardHTML(year){
+  const list = HOLIDAYS.filter(h=>h.date.slice(0,4)===String(year)).sort((a,b)=>a.date.localeCompare(b.date));
+  const can = CAN.manageHolidays();
+  return '<div class="card"><div class="card-head"><h2>Holidays '+year+'</h2><span class="spacer"></span>'+
+    '<span class="eyebrow">Whole organization · all companies</span>'+
+    (can ? '<button class="btn sm" onclick="holidayForm()">+ Add holiday</button>' : '')+'</div>'+
+    (list.length
+      ? '<table><thead><tr><th>Date</th><th>Holiday</th><th class="r"></th></tr></thead><tbody>'+
+        list.map(h=>'<tr'+(h.date<TODAY?' style="opacity:.7"':'')+'>'+
+          '<td class="num tiny" style="white-space:nowrap">'+fmtDate(h.date)+' <span class="muted">'+WEEKDAY_NAMES[dayOfWeek(h.date)]+'</span></td>'+
+          '<td class="wrap">'+esc(h.name)+(h.description?'<div class="tiny muted">'+esc(h.description)+'</div>':'')+'</td>'+
+          '<td class="r" style="white-space:nowrap">'+(can
+            ? '<button class="btn ghost sm" onclick="holidayForm(\''+h.id+'\')">Edit</button>'+
+              (holidayLocked(h) ? '' : ' <button class="btn ghost sm" onclick="confirmDeleteHoliday(\''+h.id+'\')">Delete</button>')
+            : '')+'</td></tr>').join("")+'</tbody></table>'
+      : '<div class="empty">No holidays added for '+year+'.</div>')+
+    '<p class="tiny muted" style="margin-top:10px">Sunday is the weekly off and is not listed. Saturdays and holidays are optional working days: '+
+      'nobody is marked absent for them, and working one (punch in and out) earns 1 Earned Leave. '+
+      (can ? 'Holidays can be added for future dates only; past holidays keep their date.' : 'Only a Partner can add or change holidays.')+'</p></div>';
+}
+function holidayForm(id){
+  if(!CAN.manageHolidays()) return toast("Only a Partner can add or change holidays");
+  const h = id ? HOLIDAYS.find(x=>x.id===id) : null;
+  if(id && !h) return toast("That holiday no longer exists — refresh the page");
+  const locked = holidayLocked(h);
+  modal('<h3>'+(h?'Edit holiday':'Add holiday')+'</h3>'+
+    '<label class="field"><span>Date *</span><input type="date" id="hfDate" min="'+addDays(TODAY,1)+'" value="'+(h?h.date:'')+'"'+(locked?' disabled':'')+'></label>'+
+    (locked ? '<p class="tiny muted" style="margin:-6px 0 10px">This date has passed, so it cannot be moved. You can still correct the name or description.</p>' : '')+
+    '<label class="field"><span>Holiday name *</span><input type="text" id="hfName" maxlength="100" value="'+esc(h?h.name:'')+'" placeholder="e.g. Diwali"></label>'+
+    '<label class="field"><span>Description</span><textarea id="hfDesc" maxlength="500" rows="3" placeholder="Optional">'+esc(h?h.description:'')+'</textarea></label>'+
+    '<p class="tiny muted">Shown in every employee\'s calendar, in every company of '+esc(FIRM.name)+'.</p>'+
+    '<div class="row"><button class="btn ghost" onclick="closeModal()">Cancel</button>'+
+    '<button class="btn" id="hfSave" onclick="saveHoliday('+(h?'\''+h.id+'\'':'')+')">'+(h?'Save changes':'Add holiday')+'</button></div>');
+}
+async function saveHoliday(id){
+  if(!CAN.manageHolidays()) return toast("Only a Partner can add or change holidays");
+  const h = id ? HOLIDAYS.find(x=>x.id===id) : null;
+  const date = $("#hfDate").value, name = $("#hfName").value.trim(), description = $("#hfDesc").value.trim();
+  if(!date || !validISODate(date)) return toast("Choose the holiday date");
+  if(!name) return toast("Enter the holiday name");
+  if(name.length>100) return toast("The name can be at most 100 characters");
+  if(description.length>500) return toast("The description can be at most 500 characters");
+  const dateChanged = !h || date!==h.date;
+  if(dateChanged && date<=TODAY) return toast(h ? "A holiday can only be moved to a future date" : "Holidays can only be added for future dates");
+  if(h && dateChanged && holidayLocked(h)) return toast("This holiday's date has passed, so it cannot be moved");
+  const clash = HOLIDAYS.find(x=>x.date===date && x.id!==id);
+  if(clash) return toast("There is already a holiday on "+fmtDate(date)+": "+clash.name);
+  const btn=$("#hfSave"); if(btn.disabled) return; btn.disabled=true;
+  const fields = { name, description:description||null };
+  if(dateChanged) fields.holiday_date = date;
+  const { data, error } = h
+    ? await supabase.from("holidays").update(fields).eq("id", h.id).select("*").maybeSingle()
+    : await supabase.from("holidays").insert({ organization_id:ORG_ID, ...fields }).select("*").single();
+  btn.disabled=false;
+  if(error) return toast(error.code==="23505" ? "There is already a holiday on that date" : "Could not save the holiday — "+error.message);
+  if(!data) return toast("Could not save the holiday — only a Partner can change holidays");
+  const row = mapHoliday(data);
+  HOLIDAYS = HOLIDAYS.filter(x=>x.id!==row.id).concat(row);
+  closeModal(); toast(h ? "Holiday updated" : name+" added to everyone's calendar"); render();
+}
+function confirmDeleteHoliday(id){
+  const h = HOLIDAYS.find(x=>x.id===id); if(!h) return;
+  if(!CAN.manageHolidays()) return toast("Only a Partner can delete holidays");
+  if(holidayLocked(h)) return toast("A holiday dated today or earlier cannot be deleted");
+  modal('<h3>Delete holiday?</h3><p style="margin:0 0 10px"><strong>'+esc(h.name)+'</strong> on '+fmtDate(h.date)+
+    ' will be removed from every employee\'s calendar.</p>'+
+    '<div class="row"><button class="btn ghost" onclick="closeModal()">Cancel</button>'+
+    '<button class="btn" id="hdDel" onclick="deleteHoliday(\''+h.id+'\')">Delete holiday</button></div>');
+}
+async function deleteHoliday(id){
+  const btn=$("#hdDel"); if(btn && btn.disabled) return; if(btn) btn.disabled=true;
+  const { data, error } = await supabase.from("holidays").delete().eq("id", id).select("id");
+  if(btn) btn.disabled=false;
+  if(error) return toast("Could not delete the holiday — "+error.message);
+  if(!data || !data.length) return toast("Could not delete the holiday — only a Partner can delete holidays");
+  HOLIDAYS = HOLIDAYS.filter(x=>x.id!==id);
+  closeModal(); toast("Holiday deleted"); render();
+}
+
+/* =====================  DESIGNATIONS (044)  ===================== */
+/* A designation is the employee's title (designations.name) and maps to one of
+   the 7 access levels in profiles.role, which every permission check still
+   uses. The 7 built-in designations keep today's names and are read-only. The
+   list is managed by Partners, Managers and Assistant Managers — a non-partner
+   only for levels below their own; the access level never changes once set.
+   Assigning a designation to an employee stays with Partners (Team page).
+   Loaded on its own: before 044 is applied this fails quietly and the app
+   keeps the fixed list. */
+let DESIG_LIST = [], DESIG_ERROR = "";
+const mapDesignation = d => ({ id:d.id, name:d.name, accessRole:d.access_role, builtin:!!d.is_builtin,
+  active:!!d.is_active, sort:d.sort_order||0 });
+const sortDesignations = () => DESIG_LIST.sort((a,b)=>(RANK[b.accessRole]||0)-(RANK[a.accessRole]||0) ||
+  (b.builtin?1:0)-(a.builtin?1:0) || (a.sort-b.sort) || a.name.localeCompare(b.name));
+async function loadDesignations(){
+  const org = ORG_ID;
+  DESIG_LIST = []; DESIG_ERROR = "";
+  if(!org) return;
+  const [dR, pR] = await Promise.all([
+    supabase.from("designations").select("id,name,access_role,is_builtin,is_active,sort_order").eq("organization_id", org),
+    supabase.from("profiles").select("id,designation_id").eq("organization_id", org)
+  ]);
+  if(org !== ORG_ID) return;
+  const err = dR.error || pR.error;
+  if(err){ console.error("[DESIG] Designations load failed — run supabase/migrations/044_managed_designations.sql.", err); DESIG_ERROR = err.message || "unknown error"; return; }
+  DESIG_LIST = dR.data.map(mapDesignation); sortDesignations();
+  const byProfile = new Map(pR.data.map(r=>[r.id, r.designation_id]));
+  PEOPLE.forEach(applyDesignation);
+  function applyDesignation(p){
+    p.designationId = byProfile.get(p.id) || null;
+    const d = DESIG_LIST.find(x=>x.id===p.designationId);
+    p.designation = d ? d.name : "";
+  }
+}
+const designationsReady = () => !DESIG_ERROR && DESIG_LIST.length>0;
+/* What to show as someone's designation: their title, else the access level's name. */
+function desigName(p){ return (p && p.designation) || (p && p.label) || ""; }
+/* Profile page: its own profiles row, named through the loaded people list. */
+function profileDesignation(r){ const p = PEOPLE.find(x=>x.id===r.id); return (p && p.designation) || ROLE_LABEL[r.role] || r.role || ""; }
+const builtinDesignation = role => DESIG_LIST.find(d=>d.builtin && d.accessRole===role) || null;
+/* Designation <select> options for the employee form, values "d:<id>"; the
+   employee's current one stays listed even when inactive. Legacy roles with no
+   designation keep a "r:<role>" option. Without 044: the fixed role list. */
+function designationOptionsHTML(p){
+  if(!designationsReady()){
+    return (ASSIGNABLE_ROLES.includes(p.role) ? '' : '<option value="r:'+esc(p.role)+'" selected>'+esc(ROLE_LABEL[p.role]||p.role)+' (legacy)</option>')+
+      ASSIGNABLE_ROLES.map(r=>'<option value="r:'+r+'"'+(r===p.role?" selected":"")+'>'+ROLE_LABEL[r]+'</option>').join("");
+  }
+  const cur = p.designationId || (p.id ? null : (builtinDesignation(p.role)||{}).id);
+  const list = DESIG_LIST.filter(d=>d.active || d.id===cur);
+  return (!cur && p.role && !builtinDesignation(p.role) ? '<option value="r:'+esc(p.role)+'" selected>'+esc(ROLE_LABEL[p.role]||p.role)+' (legacy)</option>' : '')+
+    ASSIGNABLE_ROLES.map(r=>{
+      const ds = list.filter(d=>d.accessRole===r);
+      return ds.length ? '<optgroup label="'+esc(ROLE_LABEL[r])+' access">'+ds.map(d=>'<option value="d:'+d.id+'"'+(d.id===cur?" selected":"")+'>'+
+        esc(d.name)+(d.active?'':' (inactive)')+'</option>').join("")+'</optgroup>' : '';
+    }).join("");
+}
+/* "d:<id>" / "r:<role>" → { role, designationId } */
+function parseDesignationChoice(v){
+  v = String(v||"");
+  if(v.startsWith("d:")){ const d = DESIG_LIST.find(x=>x.id===v.slice(2)); return d ? { role:d.accessRole, designationId:d.id, name:d.name } : null; }
+  if(v.startsWith("r:")) return { role:v.slice(2), designationId:null, name:ROLE_LABEL[v.slice(2)]||v.slice(2) };
+  return null;
+}
+
+VIEWS.designations = {
+  title:"Designations", sub:()=>"Employee titles and the access level each one carries",
+  render(){
+    if(!CAN.manageDesignations()) return '<div class="card"><div class="empty">Only Partners, Managers and Assistant Managers manage designations.</div></div>';
+    if(DESIG_ERROR) return '<div class="card"><div class="card-head"><h2>Designations</h2></div>'+
+      '<p class="tiny" style="color:var(--red)">Designations could not be loaded — '+esc(DESIG_ERROR)+'</p></div>';
+    const used = id => ALL_PEOPLE.filter(p=>p.designationId===id && !p.deleted).length;
+    return '<div class="card"><div class="card-head"><h2>Designations</h2><span class="spacer"></span>'+
+      '<button class="btn" onclick="designationForm()">+ Add designation</button></div>'+
+      '<p class="tiny muted" style="margin-bottom:12px">A designation is the title shown for an employee. Its access level decides what they can do in the app and '+
+        'cannot be changed later. The seven standard designations are fixed. '+
+        (rank()>=RANK.partner ? '' : 'You can add and change designations below your own level ('+esc(ROLE_LABEL[person(me).role]||'')+'). ')+
+        'Partners assign designations to employees on the Team page.</p>'+
+      '<table><thead><tr><th>Designation</th><th>Access level</th><th class="r">Employees</th><th>Status</th><th class="r"></th></tr></thead><tbody>'+
+      DESIG_LIST.map(d=>{
+        const n = used(d.id);
+        return '<tr'+(d.active?'':' style="opacity:.6"')+'><td>'+esc(d.name)+(d.builtin?' <span class="tag">standard</span>':'')+'</td>'+
+          '<td class="tiny">'+esc(ROLE_LABEL[d.accessRole]||d.accessRole)+'</td>'+
+          '<td class="r num">'+n+'</td>'+
+          '<td><span class="tag '+(d.active?'ok':'')+'">'+(d.active?'active':'inactive')+'</span></td>'+
+          '<td class="r" style="white-space:nowrap">'+(CAN.editDesignation(d)
+            ? '<button class="btn ghost sm" onclick="designationForm(\''+d.id+'\')">Edit</button> '+
+              '<button class="btn ghost sm" onclick="toggleDesignation(\''+d.id+'\')">'+(d.active?'Deactivate':'Activate')+'</button>'+
+              (n ? '' : ' <button class="btn ghost sm" onclick="deleteDesignation(\''+d.id+'\')">Delete</button>')
+            : '')+'</td></tr>';
+      }).join("")+'</tbody></table></div>';
+  }
+};
+/* Access levels the signed-in user may give a new designation. */
+const designationLevelChoices = () => ASSIGNABLE_ROLES.filter(r=>rank()>=RANK.partner || (RANK[r]||0) < rank());
+function designationForm(id){
+  if(!CAN.manageDesignations()) return toast("Only Partners, Managers and Assistant Managers manage designations");
+  const d = id ? DESIG_LIST.find(x=>x.id===id) : null;
+  if(d && !CAN.editDesignation(d)) return toast(d.builtin ? "Standard designations cannot be changed" : "You can only change designations below your own level");
+  modal('<h3>'+(d?'Edit designation':'Add designation')+'</h3>'+
+    '<label class="field"><span>Designation name *</span><input type="text" id="dfName" maxlength="60" value="'+esc(d?d.name:'')+'" placeholder="e.g. Audit Executive"></label>'+
+    '<label class="field"><span>Access level *</span><select id="dfRole"'+(d?' disabled':'')+'>'+
+      (d ? '<option>'+esc(ROLE_LABEL[d.accessRole]||d.accessRole)+'</option>'
+         : '<option value="">Choose what this designation can do…</option>'+
+           designationLevelChoices().map(r=>'<option value="'+r+'">'+esc(ROLE_LABEL[r])+'</option>').join(""))+
+    '</select></label>'+
+    '<p class="tiny muted" style="margin-top:-6px">'+(d ? 'The access level is fixed once a designation is created.'
+      : 'Employees with this designation get the same permissions as a '+'standard designation of this level. It cannot be changed later.')+'</p>'+
+    '<div class="row"><button class="btn ghost" onclick="closeModal()">Cancel</button>'+
+    '<button class="btn" id="dfSave" onclick="saveDesignation('+(d?'\''+d.id+'\'':'')+')">'+(d?'Save changes':'Add designation')+'</button></div>');
+}
+async function saveDesignation(id){
+  const d = id ? DESIG_LIST.find(x=>x.id===id) : null;
+  const name = $("#dfName").value.trim().replace(/\s+/g," ");
+  const role = d ? d.accessRole : $("#dfRole").value;
+  if(name.length<2 || name.length>60) return toast("The name must be 2–60 characters");
+  if(!role) return toast("Choose the access level");
+  if(d ? !CAN.editDesignation(d) : !designationLevelChoices().includes(role))
+    return toast("You can only manage designations below your own level");
+  if(DESIG_LIST.some(x=>x.id!==id && x.name.toLowerCase()===name.toLowerCase())) return toast('"'+name+'" already exists');
+  const btn=$("#dfSave"); if(btn.disabled) return; btn.disabled=true;
+  const cols = "id,name,access_role,is_builtin,is_active,sort_order";
+  const { data, error } = d
+    ? await supabase.from("designations").update({ name }).eq("id", d.id).select(cols).maybeSingle()
+    : await supabase.from("designations").insert({ organization_id:ORG_ID, name, access_role:role, sort_order:RANK[role]||0 }).select(cols).single();
+  btn.disabled=false;
+  if(error) return toast(error.code==="23505" ? '"'+name+'" already exists' : "Could not save the designation — "+error.message);
+  if(!data) return toast("Could not save the designation — you do not have permission to change it");
+  const row = mapDesignation(data);
+  DESIG_LIST = DESIG_LIST.filter(x=>x.id!==row.id).concat(row); sortDesignations();
+  ALL_PEOPLE.forEach(p=>{ if(p.designationId===row.id) p.designation=row.name; });
+  closeModal(); toast(d ? "Designation updated" : row.name+" added"); render();
+}
+async function toggleDesignation(id){
+  const d = DESIG_LIST.find(x=>x.id===id);
+  if(!d || !CAN.editDesignation(d)) return toast("You cannot change this designation");
+  const { data, error } = await supabase.from("designations").update({ is_active:!d.active }).eq("id", id).select("id,is_active").maybeSingle();
+  if(error) return toast("Could not update — "+error.message);
+  if(!data) return toast("Could not update — you do not have permission to change it");
+  d.active = !!data.is_active;
+  toast(d.name+(d.active?" activated":" deactivated — employees who have it keep it")); render();
+}
+async function deleteDesignation(id){
+  const d = DESIG_LIST.find(x=>x.id===id);
+  if(!d || !CAN.editDesignation(d)) return toast("You cannot delete this designation");
+  if(ALL_PEOPLE.some(p=>p.designationId===id)) return toast(d.name+" is in use — deactivate it instead");
+  const { data, error } = await supabase.from("designations").delete().eq("id", id).select("id");
+  if(error) return toast("Could not delete — "+error.message);
+  if(!data || !data.length) return toast("Could not delete — you do not have permission to change it");
+  DESIG_LIST = DESIG_LIST.filter(x=>x.id!==id);
+  toast(d.name+" deleted"); render();
+}
+/* After create-employee (which only knows the role and gives the built-in
+   designation of that role), set the chosen custom designation. */
+async function setProfileDesignation(profileId, designationId){
+  const { data, error } = await supabase.from("profiles").update({ designation_id:designationId })
+    .eq("id", profileId).select("id,role,designation_id").maybeSingle();
+  if(error || !data) return { ok:false, message:error ? error.message : "no permission" };
+  return { ok:true, row:data };
+}
+
 /* =========================  NAV  ============================= */
 const NAV = [
   { g:"Daily",     items:[["today","Today"],["mycal","My calendar"],["attendance","Attendance"],["work","Work"]] },
-  { g:"Jobs",      items:[["jobs","Job codes"],["calendar","Statutory calendar"]] },
+  { g:"Jobs",      items:[["jobs","Job codes"]] },
   { g:"Time",      items:[["mytime","My time"],["leave","Leave"],["approvals","Approvals"],["firmtime","Time on jobs"]] },
   { g:"Money",     items:[["expenses","Expenses"],["mysalary","My salary"],["salary","Salary"]] },
   { g:"Management",items:[["reports","Reports"]] },
-  { g:"Setup",     items:[["companies","Companies"],["people","Team"],["clients","Sites & Clients"]] },
+  { g:"Setup",     items:[["companies","Companies"],["people","Team"],["designations","Designations"],["clients","Sites & Clients"]] },
   { g:"Account",   items:[["profile","Profile"]] }
 ];
 
@@ -6947,6 +7779,7 @@ function visible(v){
   if(v==="reports")   return CAN.seeReports();
   if(v==="companies") return CAN.manageCompanies();
   if(v==="people")    return CAN.viewMasters();
+  if(v==="designations") return CAN.manageDesignations() && designationsReady();
   if(v==="clients")   return CAN.viewMasters();
   return true;
 }
@@ -7594,7 +8427,8 @@ const BI_KINDS = {
     can:()=>CAN.manageTeam(), denied:"Only a partner can add employees",
     columns:()=>{
       const comps=assignableCompanies().map(c=>c.name);
-      const roles=ASSIGNABLE_ROLES.map(r=>ROLE_LABEL[r]);
+      // Managed designations (044) when available, else the fixed list.
+      const roles=designationsReady() ? DESIG_LIST.filter(d=>d.active).map(d=>d.name) : ASSIGNABLE_ROLES.map(r=>ROLE_LABEL[r]);
       const bosses=biBossChoices().map(biChoice);
       return [
         { key:"name", header:"Full name", req:true, width:26, kind:"text", help:"The employee's full name.", allowed:"Text", ex:["Asha Rao","Vikram Mehta"] },
@@ -7685,7 +8519,7 @@ function biTemplateSheets(kind){
       .concat(Array.from({length:maxLen},(_,i)=>lists.map(c=>c.list[i]===undefined?"":{v:c.list[i],s:S.text}))) };
 
   return kind === "clients"
-  ? [data]
+  ? [data, listsSheet]
   : [ins, data, ex, listsSheet];
 }
 function biDownloadTemplate(kind){
@@ -7936,8 +8770,12 @@ function biEmployeeRecords(rows){
     if(seenEmail.has(email)){ dup("Email "+email+" appears earlier in this file (row "+seenEmail.get(email)+")"); continue; }
     const roleIn=biStr(v.role).toLowerCase();
     if(!roleIn){ bad("Choose a designation"); continue; }
-    const role=ASSIGNABLE_ROLES.find(r=>ROLE_LABEL[r].toLowerCase()===roleIn || r===roleIn.replace(/[\s-]+/g,"_"));
-    if(!role){ bad("Designation must be one of: "+ASSIGNABLE_ROLES.map(r=>ROLE_LABEL[r]).join(", ")); continue; }
+    // A managed designation (044) by name, else a standard one by name or code.
+    const dMatch=designationsReady() ? DESIG_LIST.find(d=>d.active && d.name.toLowerCase()===roleIn.replace(/\s+/g," ")) : null;
+    const role=dMatch ? dMatch.accessRole : ASSIGNABLE_ROLES.find(r=>ROLE_LABEL[r].toLowerCase()===roleIn || r===roleIn.replace(/[\s-]+/g,"_"));
+    if(!role){ bad("Designation must be one of: "+(designationsReady() ? DESIG_LIST.filter(d=>d.active).map(d=>d.name) : ASSIGNABLE_ROLES.map(r=>ROLE_LABEL[r])).join(", ")); continue; }
+    rec.designationId=dMatch && !dMatch.builtin ? dMatch.id : null;
+    rec.designationName=dMatch ? dMatch.name : ROLE_LABEL[role];
     const joined=biDate(v.joined);
     if(joined===null){ bad("Joined on must be a valid date, e.g. 01-Apr-2026"); continue; }
     const ctc=biAmount(v.ctc,BI_MAX_CTC), cost=biAmount(v.cost,BI_MAX_RATE), bill=biAmount(v.bill,BI_MAX_RATE);
@@ -8276,6 +9114,10 @@ async function biImportEmployees(st, ready){
     const r=await createEmployeeAccount(Object.assign({}, rec.payload, { generatePassword:true }));
     if(r.ok && r.password && r.profile){
       rec.status="imported"; rec.createdId=r.profile.id; rec.password=r.password; rec.reason="";
+      if(rec.designationId){   // create-employee gave that level's standard designation
+        const set=await setProfileDesignation(r.profile.id, rec.designationId);
+        if(!set.ok) rec.warnings.push("Designation could not be set to "+rec.designationName+" — edit this employee to set it");
+      }
       if(!r.hasSalary) rec.warnings.push("Salary record not confirmed by the server — check this employee's CTC on the Salary page");
     } else if(r.ok){
       // An outdated create-employee that ignored generatePassword: nothing usable came back.
@@ -8326,7 +9168,7 @@ function biDownloadCreds(){
       cols:[{width:15},{width:26},{width:32},{width:22},{width:26},{width:20}],
       rows:[["Employee code","Full name","Sign-in email","Temporary password","Company","Designation"].map(v=>({v,s:S.headReq}))]
         .concat(creds.map(r=>[r.payload.employeeCode, r.payload.fullName, r.payload.email, r.password,
-          companyFullName(r.payload.companyId), ROLE_LABEL[r.payload.role]].map(v=>({v,s:S.text})))) },
+          companyFullName(r.payload.companyId), r.designationName||ROLE_LABEL[r.payload.role]].map(v=>({v,s:S.text})))) },
     { name:"Read me", headerStyle:S.title, cols:[{width:100}],
       rows:[[{v:"Employee credentials — keep this file private",s:S.title}],
         [{v:FIRM.name+" · created "+fmtDate(TODAY)+" · "+creds.length+" employee"+(creds.length>1?"s":""),s:S.note}], [],

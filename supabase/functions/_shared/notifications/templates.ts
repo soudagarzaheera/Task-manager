@@ -31,6 +31,7 @@ export type NotificationType =
   | "timesheet_rejected"
   | "partner_daily_summary"
   | "job_closed"
+  | "job_partner_changed"
   | "employee_invited"
   | "employee_deactivated"
   | "employee_reactivated";
@@ -80,6 +81,7 @@ export const TEMPLATES: Record<NotificationType, Builder> = {
       ["Job code", jobLabel(d)],
       ["Task", d.task_title],
       ["Assigned by", d.assigned_by_name],
+      ["Responsible partner", d.responsible_partner_name],
       ["Due date", fmtDate(d.due_date)],
       ["Budgeted hours (task)", fmtHours(d.estimated_hours)],
       ["Budgeted hours (job)", fmtHours(d.job_budget_hours)],
@@ -123,6 +125,7 @@ export const TEMPLATES: Record<NotificationType, Builder> = {
       ["Current date", fmtDate(d.today)],
       ["Days overdue", String(d.days_overdue)],
       ["Current status", statusLabel(d.task_status)],
+      ["Responsible partner", d.responsible_partner_name],
     ],
     action: { label: "Open task", url: getTaskLink(d.task_id) },
     tone: "bad",
@@ -189,6 +192,7 @@ export const TEMPLATES: Record<NotificationType, Builder> = {
       ["Company", d.company_name],
       ["Job code", jobLabel(d)],
       ["Client", d.client_name],
+      ["Responsible partner", d.responsible_partner_name],
       ["Original budgeted hours", fmtHours(d.original_budget_hours)],
       ["Currently available", fmtHours(d.from_hours)],
       ["Hours booked so far", fmtHours(d.booked_hours)],
@@ -325,17 +329,51 @@ export const TEMPLATES: Record<NotificationType, Builder> = {
   job_closed: (d) => ({
     subject: `Job Closed: ${d.job_code}`,
     preheader: `${d.job_code} has been closed — no more time or tasks can be added.`,
-    title: "A job you worked on has been closed",
+    title: d.is_responsible_partner && !d.task_count
+      ? "A job you are responsible for has been closed"
+      : "A job you worked on has been closed",
     intro: `${d.job_code}${d.client_name ? ` for ${d.client_name}` : ""} has been closed. ` +
       `No more time can be booked and no new tasks can be assigned unless it is reopened.`,
     details: [
       ["Job code", jobLabel(d)],
       ["Client", d.client_name],
+      ["Responsible partner", d.responsible_partner_name],
       ["Closed by", d.closed_by_name],
       ["Closed on", fmtDateTime(d.closed_at, d.timezone)],
       ["Your tasks on this job", d.task_count ? String(d.task_count) : null],
     ],
     note: d.closing_note ? { label: "Closing note", text: truncate(d.closing_note, 1000) } : null,
+    action: { label: "Open job", url: getJobLink(d.job_id) },
+    tone: "info",
+  }),
+
+  // Queued by notif_job_partner_changed() (042). To the new Responsible
+  // Partner (CC the previous one), or to the previous partner when the new
+  // partner made the change. The client's Relationship Partner is unchanged.
+  job_partner_changed: (d) => ({
+    subject: d.is_new_job
+      ? `Responsible Partner: ${d.job_code}`
+      : `Responsible Partner Changed: ${d.job_code}`,
+    preheader: `${d.responsible_partner_name || "A new partner"} is now the responsible partner for ${d.job_code}.`,
+    title: d.is_new_job ? "You are the responsible partner for a new job" : "Responsible partner changed",
+    intro: d.is_new_job
+      ? `${d.changed_by_name || "Your team"} raised ${d.job_code}${d.client_name ? ` for ${d.client_name}` : ""} ` +
+        `and named ${d.responsible_partner_name} as its responsible partner.`
+      : `${d.changed_by_name || "Your team"} changed the responsible partner for ${d.job_code}` +
+        `${d.client_name ? ` (${d.client_name})` : ""} from ${d.previous_partner_name || "nobody"} ` +
+        `to ${d.responsible_partner_name || "nobody"}. Only this job is affected.`,
+    details: [
+      ["Job code", jobLabel(d)],
+      ["Client", d.client_name],
+      ["Responsible partner", d.responsible_partner_name],
+      ["Previous responsible partner", d.is_new_job ? null : (d.previous_partner_name || "None")],
+      ["Client relationship partner", d.relationship_partner_name],
+      ["Status", statusLabel(d.job_status)],
+      ["Internal due date", d.internal_due_date ? fmtDate(d.internal_due_date) : null],
+      ["Statutory due date", d.statutory_due_date ? fmtDate(d.statutory_due_date) : null],
+      ["Changed by", d.changed_by_name],
+      ["Changed on", fmtDateTime(d.changed_at, d.timezone)],
+    ],
     action: { label: "Open job", url: getJobLink(d.job_id) },
     tone: "info",
   }),

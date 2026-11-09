@@ -60,6 +60,10 @@ const STATUS_LABELS: Record<string, string> = {
   approved: "Approved",
   rejected: "Rejected",
   queried: "Sent back",
+  // job statuses (job_partner_changed, 042)
+  open: "Open",
+  under_review: "Under review",
+  closed: "Closed",
 };
 export const statusLabel = (s: unknown) => STATUS_LABELS[String(s)] || String(s ?? "");
 
