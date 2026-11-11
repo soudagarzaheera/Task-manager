@@ -1404,6 +1404,11 @@ const XLSX = (() => {
 
   function download(filename, sheets, opts){
     const bytes = build(sheets, opts);
+    // Mobile app (Capacitor): the WebView ignores <a download>, so save the
+    // same bytes with Filesystem and offer them via the share sheet (fileSave.js).
+    if(window.nativeFiles && window.nativeFiles.isNativeApp())
+      return window.nativeFiles.saveNativeFile(filename, bytes,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     const blob = new Blob([bytes], {type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -2778,7 +2783,12 @@ async function savePayslipPdf(d, btn){
   try{
     const doc = await buildPayslipPdf(d);
     const safe = s => String(s||"").replace(/[^A-Za-z0-9_-]+/g,"_");
-    doc.save("Payslip_"+safe(d.employeeId||d.employeeName)+"_"+d.month+".pdf");
+    const fileName = "Payslip_"+safe(d.employeeId||d.employeeName)+"_"+d.month+".pdf";
+    // Mobile app: jsPDF's doc.save() does nothing in the Android WebView.
+    if(window.nativeFiles && window.nativeFiles.isNativeApp())
+      await window.nativeFiles.saveNativeFile(fileName, doc.output("arraybuffer"), "application/pdf");
+    else
+      doc.save(fileName);
   }catch(err){
     console.error("[payslip]", err);
     toast("Could not create the PDF — "+(err && err.message ? err.message : err));
@@ -5170,11 +5180,15 @@ function doPunch(type){
   const site=PUNCH_SITES.find(s=>s.id===selectedPunchSiteId && s.active);
   if(!site) return punchFailure("Select an active office site.");
   const btn=$("#punchBtn"); if(btn){btn.disabled=true;btn.textContent="Finding you…";}
-  if(!navigator.geolocation)
-    return punchFailure("This browser does not support location. Punch was not recorded.");
-  navigator.geolocation.getCurrentPosition(
+  /* getDevicePosition (location.js): native GPS via @capacitor/geolocation in
+     the mobile app (with permission check/request), navigator.geolocation in
+     the browser/desktop app. Options are unchanged: enableHighAccuracy,
+     timeout 15s, maximumAge 0 — every punch takes a fresh reading. */
+  if(typeof window.getDevicePosition!=="function")
+    return punchFailure("Location is still loading — try again in a moment. Punch was not recorded.");
+  window.getDevicePosition().then(
     p=>{
-      console.log("[GEOFENCE DEBUG] Browser position",{
+      console.log("[GEOFENCE DEBUG] Device position",{
         latitude:p.coords.latitude, longitude:p.coords.longitude,
         accuracy:p.coords.accuracy, timestamp:new Date(p.timestamp).toISOString()
       });
@@ -5182,24 +5196,10 @@ function doPunch(type){
     },
     err=>{
       // Different situations, different messages (req. #12) — a permission
-      // refusal, a timeout and "no GPS" are not "outside the fence".
-      const REASONS = {
-        1:"Location permission denied — allow location access and try again",
-        2:"Location unavailable — check GPS/network and try again",
-        3:"Location request timed out — try again, ideally outdoors or near a window"
-      };
-      const reason = REASONS[err.code] || ("Location error — "+err.message);
-      punchFailure(reason+". Punch was not recorded.");
-    },
-    /* enableHighAccuracy requests the best *available* source, it does not
-       guarantee a GPS-grade fix (desktop browsers in particular usually have
-       no GPS chip at all). timeout raised from 8s to 15s — indoor/first-fix
-       GPS acquisition routinely takes longer than 8s and was very likely
-       timing out here, which (before this fix) silently read as "outside".
-       maximumAge:0 is made explicit — every punch already requested a fresh
-       reading (this was the spec default, so req. #11's "stale location"
-       concern did not apply, but it is now explicit rather than implied. */
-    {enableHighAccuracy:true, timeout:15000, maximumAge:0});
+      // refusal, GPS switched off, a timeout and "no GPS" are not "outside the fence".
+      console.warn("[geofence] location error",err);
+      punchFailure(window.locationErrorMessage(err)+". Punch was not recorded.");
+    });
 }
 
 
@@ -5250,9 +5250,9 @@ let PENDING_OTHER = null;   // { type, lat, lng, accuracy, at, address }
 
 function startOtherPlacePunch(type){
   const btn=$("#punchBtn"); if(btn){btn.disabled=true;btn.textContent="Finding you…";}
-  if(!navigator.geolocation)
-    return punchFailure("This browser does not support location. Punch was not recorded.");
-  navigator.geolocation.getCurrentPosition(async p=>{
+  if(typeof window.getDevicePosition!=="function")
+    return punchFailure("Location is still loading — try again in a moment. Punch was not recorded.");
+  window.getDevicePosition().then(async p=>{
     const lat=p.coords.latitude, lng=p.coords.longitude, accuracy=p.coords.accuracy;
     if(!Number.isFinite(lat)||!Number.isFinite(lng)||Math.abs(lat)>90||Math.abs(lng)>180)
       return punchFailure("Your current GPS location could not be verified. Punch was not recorded.");
@@ -5278,13 +5278,9 @@ function startOtherPlacePunch(type){
       '<div class="row"><button class="btn ghost" onclick="cancelOtherPlacePunch()">Cancel</button>'+
       '<button class="btn" id="opConfirm" onclick="confirmOtherPlacePunch()">Confirm punch '+(type==="in"?"in":"out")+'</button></div>');
   }, err=>{
-    const REASONS = {
-      1:"Location permission denied — allow location access and try again",
-      2:"Location unavailable — check GPS/network and try again",
-      3:"Location request timed out — try again, ideally outdoors or near a window"
-    };
-    punchFailure((REASONS[err.code] || ("Location error — "+err.message))+". Punch was not recorded.");
-  }, {enableHighAccuracy:true, timeout:15000, maximumAge:0});
+    console.warn("[other place] location error",err);
+    punchFailure(window.locationErrorMessage(err)+". Punch was not recorded.");
+  });
 }
 function cancelOtherPlacePunch(){ PENDING_OTHER=null; closeModal(); }
 async function confirmOtherPlacePunch(){
@@ -9267,6 +9263,13 @@ function biDownloadCreds(){
   window.EDGE_FN_URL = supabaseUrl ? supabaseUrl.replace(/\/$/, "") + "/functions/v1/create-employee" : "";
   window.SUPABASE_FN_BASE = supabaseUrl ? supabaseUrl.replace(/\/$/, "") + "/functions/v1/" : "";
   window.createPasswordCheckClient = createPasswordCheckClient;
+  // Attendance punches: native GPS in the Capacitor app, browser geolocation elsewhere.
+  import { getDevicePosition, locationErrorMessage } from './location.js';
+  window.getDevicePosition = getDevicePosition;
+  window.locationErrorMessage = locationErrorMessage;
+  // Exports/payslips in the mobile app: Filesystem + share sheet instead of browser downloads.
+  import { isNativeApp as isNativeFiles, saveNativeFile } from './fileSave.js';
+  window.nativeFiles = { isNativeApp: isNativeFiles, saveNativeFile };
   // Payslip PDFs: jsPDF is fetched only when someone downloads one.
   window.loadJsPDF = () => import('jspdf').then(m => m.jsPDF);
   // Desktop app only: update notifications (no-op in the browser).
