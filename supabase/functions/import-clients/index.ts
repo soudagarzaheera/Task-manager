@@ -35,11 +35,10 @@ const RANK: Record<string, number> = {
 };
 const MANAGE_CLIENTS_RANK = 60;
 
-// Mirrors CLIENT_TYPES in index.html and the clients.entity_type CHECK (001).
-export const CLIENT_TYPES = [
-  "Individual", "Proprietor", "Partnership", "LLP", "Private Ltd", "Public Ltd", "Trust", "HUF", "Society",
-];
+// Client type is free text (047, chk_clients_entity_type): any value, stored as
+// entered after trimming. Blank keeps the Add Client default.
 const DEFAULT_TYPE = "Private Ltd";
+export const MAX_TYPE_LENGTH = 100;
 
 const MAX_ROWS = 200; // per request — the browser sends larger files in chunks
 const CODE_RE = /^[A-Z0-9]{2,8}$/;
@@ -118,12 +117,8 @@ export function cleanRow(r: ClientRow): { ok: true; row: Clean } | { ok: false; 
   if (pan && !PAN_RE.test(pan)) return { ok: false, reason: "PAN should look like AABCS1234K" };
   if (gstin && gstin.length !== 15) return { ok: false, reason: "A GSTIN is 15 characters" };
   if (email && !EMAIL_RE.test(email)) return { ok: false, reason: "Enter a valid email address" };
-  let type = DEFAULT_TYPE;
-  if (typeIn) {
-    const match = CLIENT_TYPES.find((t) => t.toLowerCase() === typeIn.toLowerCase());
-    if (!match) return { ok: false, reason: `Type must be one of: ${CLIENT_TYPES.join(", ")}` };
-    type = match;
-  }
+  if (typeIn.length > MAX_TYPE_LENGTH) return { ok: false, reason: `Type can be at most ${MAX_TYPE_LENGTH} characters` };
+  const type = typeIn || DEFAULT_TYPE;
   if (!partnerCode) return { ok: false, reason: "Choose a relationship partner" };
   return { ok: true, row: { row: Number(r.row) || 0, code, name, type, pan, gstin, email, phone, partnerCode } };
 }
@@ -219,20 +214,21 @@ async function handle(req: Request, json: Json): Promise<Response> {
     else results.push({ row: Number(r.row) || 0, status: "failed", reason: c.reason });
   }
 
-  // Relationship partner: an active Assistant Manager, Manager or Partner the
-  // caller can see — the same people the Add Client form's dropdown offers
-  // (staff() filtered to MANAGER_RANK), matched by employee code.
+  // Relationship partner: any active employee the caller can see (profiles
+  // RLS keeps company scope), of any designation — the same people the Add
+  // Client form's dropdown offers — matched by employee code. It marks who
+  // handles the client and grants no access.
   const partnerCodes = [...new Set(valid.map((v) => v.partnerCode))];
   const partners = new Map<string, string>();
   if (partnerCodes.length) {
     const { data: ppl, error: pplErr } = await userDb
       .from("profiles")
-      .select("id, employee_code, role, is_active")
+      .select("id, employee_code, is_active, deleted_at")
       .eq("organization_id", orgId)
       .in("employee_code", partnerCodes);
     if (pplErr) return fail(500, "Could not check the relationship partners.", pplErr);
     for (const p of ppl || []) {
-      if (p.is_active && (RANK[p.role] || 0) >= MANAGE_CLIENTS_RANK) partners.set(String(p.employee_code), p.id);
+      if (p.is_active && !p.deleted_at) partners.set(String(p.employee_code), p.id);
     }
   }
 
@@ -271,7 +267,7 @@ async function handle(req: Request, json: Json): Promise<Response> {
     if (!partnerId) {
       results.push({
         row: v.row, status: "failed",
-        reason: `Relationship partner ${v.partnerCode} was not found — use the employee code of an active Assistant Manager, Manager or Partner`,
+        reason: `Relationship partner ${v.partnerCode} was not found — use the employee code of an active employee`,
       });
       continue;
     }

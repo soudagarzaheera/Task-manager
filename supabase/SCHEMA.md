@@ -324,7 +324,7 @@ This document provides the architectural reference and schema specifications for
 
 ### 21. Holiday management *(`043_holiday_management.sql`)*
 * **`holidays`** (001) gains `description` (optional, <= 500), `created_by`, `updated_by`, `updated_at`; `name` must be 1–100 characters. One holiday per date per organization (`uq_org_holiday_date`, unchanged). Holidays are organization-wide: every employee of every company sees them (`holidays_select`, 036) in My calendar.
-* **Who writes**: Partners only (`holidays_write`, 036, unchanged).
+* **Who writes**: Partners only (`holidays_write`, 036) — widened to Partners, Managers and Assistant Managers by 046.
 * **Past dates locked** (`trg_guard_holiday_change`, API users only): a holiday dated today or earlier — "today" in the organization's notification timezone, `org_today(org)` — cannot be added, moved or deleted, and a holiday cannot be moved onto such a date; its name and description stay editable. Attendance status and earned leave for those days are already settled.
 * **App**: "Holidays <year>" card on My calendar (Add / Edit / Delete for Partners; `CAN.manageHolidays()`); the day detail shows the description.
 
@@ -344,6 +344,15 @@ This document provides the architectural reference and schema specifications for
 * **`trg_timesheet_day_minimum`** (AFTER UPDATE OF status on `timesheet_entries`): when the owner submits (draft/queried → pending/approved) an entry dated from 2026-11-01, that day's total hours must be ≥ 8, or ≥ 4 when marked half day or on an approved half-day leave. Approver approve/query/undo is never checked.
 
 ---
+
+### 24. Company holidays — managers & live updates *(`046_holiday_managers_realtime.sql`)*
+* **`holidays_write`** now `auth_rank() >= 60` (Partner, Manager, Assistant Manager) within the organization; every other employee reads only (`holidays_select`, 036). Holidays stay organization-wide, not tied to the writer's company. The 043 past-date lock is unchanged for every writer.
+* **Realtime**: `holidays` is in the `supabase_realtime` publication. The app (`startHolidaySync()`) re-reads the list on any change and when the tab becomes visible again, and the calendar labels the day "Holiday: <name>".
+
+### 25. Custom client types *(`047_custom_client_types.sql`)*
+* **`clients.entity_type`** is free text: `clients_entity_type_check` (001, nine fixed values) is replaced by `chk_clients_entity_type` — no leading/trailing spaces, 1–100 characters. Stored exactly as entered after trimming. NOT NULL and DEFAULT 'Private Ltd' unchanged; no existing row changed.
+* **App / import**: the Add Client form takes any type with suggestions (`CLIENT_TYPE_SUGGESTIONS` + types already in use — suggestions only, never a restriction); the import template's Type dropdown also accepts typed values (Excel information-style validation); `import-clients` accepts any type up to 100 characters, blank = Private Ltd.
+* **Relationship partner** (`clients.relationship_partner_id`, unchanged column/FK): the app and `import-clients` now accept any active employee of any designation (previously Assistant Manager and above). It grants no access; 042's job default still applies only when it is an active Partner.
 
 ## 3. Security, Multi-Tenancy & Delete Integrity Principles
 

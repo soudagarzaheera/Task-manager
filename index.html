@@ -775,7 +775,17 @@ const ASSIGN_RANK = RANK.assistant_manager;
 const MANAGER_RANK = RANK.assistant_manager;
 /* Designation labels, highest first — the column order of the hours-by-grade reports. */
 const GRADES = () => ASSIGNABLE_ROLES.map(r=>ROLE_LABEL[r]);
-const CLIENT_TYPES = ["Individual","Proprietor","Partnership","LLP","Private Ltd","Public Ltd","Trust","HUF","Society"];
+/* Client type is free text (047): these are only the suggestions offered in the
+   Add Client form and the import template, together with every type already
+   used by the firm's clients. Any other type can be typed in. */
+const CLIENT_TYPE_SUGGESTIONS = ["Individual","Proprietor","Partnership","LLP","Private Ltd","Public Ltd","Trust","HUF","Society"];
+const CLIENT_TYPE_MAX = 100;
+const clientTypeOptions = () => {
+  const seen = new Set(), out = [];
+  CLIENT_TYPE_SUGGESTIONS.concat(ALL_CLIENTS.map(c=>c.type))
+    .forEach(t=>{ t=String(t||"").trim(); const k=t.toLowerCase(); if(t && !seen.has(k)){ seen.add(k); out.push(t); } });
+  return out;
+};
 let CLIENTS = [];
 
 /* Every place someone can legitimately punch in from. client:null = own office. */
@@ -887,7 +897,7 @@ async function loadAppData(orgId, currentProfileId){
   const results = [profilesR,companiesR,clientsR,locationsR,jobsR,tasksR,partnerTaskAssignmentsR,entriesR,holidaysR,holidayWorkedR,leavesR,
     budgetR,claimsR,claimLinesR,complianceR,nilR,punchesR];
   const firstErr = results.find(r=>r.error);
-  if(firstErr){ console.error("[DATA] Employee/profile/company data query failed",firstErr.error); LOAD_ERROR = "Could not load data from Supabase: "+firstErr.error.message; return; }
+  if(firstErr){ console.error("[DATA] Employee/profile/company data query failed",firstErr.error); LOAD_ERROR = "Could not load data: "+firstErr.error.message; return; }
 
   COMPANIES = companiesR.data.map(c=>({id:c.id,code:c.code,name:c.name,active:c.is_active,createdAt:c.created_at}));
   PEOPLE = profilesR.data.map(p=>({
@@ -1104,6 +1114,7 @@ async function loadAppData(orgId, currentProfileId){
   await Promise.all([loadPersonalEvents(), loadStatutory(), loadServices(), loadOrgPartners(), loadDesignations()]);
 
   DATA_READY = true;
+  startHolidaySync();
 }
 
 /* ======================  COMPANY CONTEXT  ======================== */
@@ -1263,7 +1274,7 @@ const XLSX = (() => {
       x += '<dataValidations count="'+dv.length+'">'+dv.map(v=>{
         const head = '<dataValidation type="'+v.type+'"'+
           (v.type==="date" ? ' operator="between"' : v.type==="decimal" ? ' operator="between"' : '')+
-          ' allowBlank="1" showInputMessage="1" showErrorMessage="1"'+(v.warnOnly?' errorStyle="warning"':'')+
+          ' allowBlank="1" showInputMessage="1" showErrorMessage="1"'+(v.openList?' errorStyle="information"':v.warnOnly?' errorStyle="warning"':'')+
           (v.error?' errorTitle="Check this value" error="'+xesc(v.error)+'"':'')+
           (v.prompt?' promptTitle="'+xesc((v.promptTitle||"").slice(0,32))+'" prompt="'+xesc(v.prompt.slice(0,255))+'"':'')+
           ' sqref="'+v.sqref+'">';
@@ -1965,9 +1976,9 @@ const CAN = {
      applyLeave()), same as their timesheet. */
   approveLeave:   (owner, r) => canApproveLeaveRequest(me, owner, r),
   manageLeavePolicy: ()   => rank()>=90,
-  /* Organization-wide holidays: Partners only — same as holidays_write (036).
-     Dates up to today are locked (trg_guard_holiday_change, 043). */
-  manageHolidays: ()      => person(me).role==="partner",
+  /* Organization-wide holidays: Partner, Manager, Assistant Manager — same as
+     holidays_write (046). Dates up to today are locked (trg_guard_holiday_change, 043). */
+  manageHolidays: ()      => rank()>=ASSIGN_RANK,
   /* Designation list: Partner, Manager, Assistant Manager (designations_* RLS, 044). */
   manageDesignations: ()  => rank()>=ASSIGN_RANK,
   /* One designation: never a built-in; a non-partner only below their own level
@@ -6019,7 +6030,7 @@ VIEWS.mycal = {
           (hh?'<i class="mk hrs"></i>':'')+
           (pe.length?'<i class="mk pe"></i>':'')+
         '</span>';
-      if(hol) h+='<span class="chip hol">'+esc(hol.name)+'</span>';
+      if(hol) h+='<span class="chip hol">'+(hol.id?'Holiday: ':'')+esc(hol.name)+'</span>';
       else if(sunday) h+='<span class="chip hol">Holiday</span>';
       if(lv)  h+='<span class="chip lv">'+esc(lv.type)+(lv.part!=="full"?" ½":"")+' leave</span>';
       jd.forEach(j=>h+='<span class="chip late">Due: '+esc(j.code.split("/")[1]||j.code)+'</span>');
@@ -6063,7 +6074,7 @@ VIEWS.mycal = {
 
       h+='<div class="card cal-detail"><div class="card-head"><h2>'+fmtDate(calSel)+'</h2>'+
         '<span class="spacer"></span>'+
-        (holName?'<span class="tag warn">'+esc(holName)+'</span>':'')+
+        (holName?'<span class="tag warn">'+(hol&&hol.id?'Holiday: ':'')+esc(holName)+'</span>':'')+
         (lv?'<span class="tag ok">'+esc(leaveTypeLabel(lv.type))+(lv.part!=="full"?" (half day)":"")+'</span>':'')+'</div>'+
         '<div class="cal-detail-body">';
       if(holName) h+='<p class="tiny" style="margin-bottom:4px"><strong>Holiday:</strong> '+esc(holName)+
@@ -7063,7 +7074,8 @@ VIEWS.clients = {
         '<td class="tiny">'+esc(c.type||"—")+'</td>'+
         '<td class="num tiny">'+esc(c.pan||"—")+'</td>'+
         '<td class="num tiny">'+esc(c.gstin||"—")+'</td>'+
-        '<td class="tiny">'+esc(person(c.partner).name)+'</td>'+
+        '<td class="tiny">'+esc(clientRelPartnerName(c.id)||"—")+
+          (person(c.partner).name!=="—" && desigName(person(c.partner)) ? '<div class="muted">'+esc(desigName(person(c.partner)))+'</div>' : '')+'</td>'+
         '<td class="r num">'+openJobs+' / '+jobs.length+'</td>'+
         '<td class="r">'+(can
           ? (c.active
@@ -7107,9 +7119,10 @@ function clientForm(c){
   return '<div class="grid g2" style="gap:10px">'+
     '<label class="field"><span>Short code</span>'+
       '<input type="text" id="cfCode" value="'+esc(c.code)+'" placeholder="Client Name" maxlength="8"></label>'+
-    '<label class="field"><span>Type</span><select id="cfType">'+
-      CLIENT_TYPES.map(t=>'<option'+(t===c.type?" selected":"")+'>'+t+'</option>').join("")+
-    '</select></label></div>'+
+    '<label class="field"><span>Type</span><input type="text" id="cfType" list="cfTypeList" maxlength="'+CLIENT_TYPE_MAX+'"'+
+      ' value="'+esc(c.type||"")+'" placeholder="e.g. Private Ltd, OPC, AOP" autocomplete="off">'+
+      '<datalist id="cfTypeList">'+clientTypeOptions().map(t=>'<option value="'+esc(t)+'">').join("")+'</datalist>'+
+    '</label></div>'+
     '<label class="field"><span>Client name</span><input type="text" id="cfName" value="'+esc(c.name)+'"></label>'+
     '<div class="grid g2" style="gap:10px">'+
     '<label class="field"><span>PAN</span><input type="text" id="cfPan" value="'+esc(c.pan||"")+'" maxlength="10"></label>'+
@@ -7118,8 +7131,8 @@ function clientForm(c){
     '<label class="field"><span>Email</span><input type="text" id="cfEmail" value="'+esc(c.email||"")+'"></label>'+
     '<label class="field"><span>Phone</span><input type="text" id="cfPhone" value="'+esc(c.phone||"")+'"></label></div>'+
     '<label class="field"><span>Relationship partner</span><select id="cfPartner">'+
-      staff().filter(p=>rank(p.id)>=MANAGER_RANK).map(p=>'<option value="'+p.id+'"'+
-        (p.id===c.partner?" selected":"")+'>'+esc(p.name)+' — '+p.label+'</option>').join("")+
+      relPartnerChoices().map(p=>'<option value="'+p.id+'"'+
+        (p.id===c.partner?" selected":"")+'>'+esc(p.name)+' — '+esc(desigName(p))+'</option>').join("")+
     '</select></label>'+
     '<p class="tiny muted">The short code becomes the first part of every job code for this client, '+
     'so keep it brief and stable.</p>';
@@ -7150,7 +7163,10 @@ async function saveClient(id){
   if(pan && !/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(pan)) return toast("PAN should look like AABCS1234K");
   if(gstin && gstin.length!==15) return toast("A GSTIN is 15 characters");
 
-  const type=$("#cfType").value, email=$("#cfEmail").value.trim(),
+  const type=$("#cfType").value.trim();
+  if(!type) return toast("Enter the client type (e.g. Private Ltd, OPC, AOP)");
+  if(type.length>CLIENT_TYPE_MAX) return toast("The client type can be at most "+CLIENT_TYPE_MAX+" characters");
+  const email=$("#cfEmail").value.trim(),
         phone=$("#cfPhone").value.trim(), partner=$("#cfPartner").value;
 
   if(id){
@@ -7473,7 +7489,7 @@ async function changeMyPassword(ev){
 
 /* =====================  HOLIDAYS (organization-wide, 043)  ===================== */
 /* One list per organization, shown in every employee's calendar whatever their
-   company (holidays_select, 036). Partners add / edit / delete. A holiday dated
+   company (holidays_select, 036). Partners, Managers and Assistant Managers add / edit / delete (046). A holiday dated
    today or earlier cannot be added, moved or deleted — attendance and earned
    leave for it are already settled — but its name and description can still be
    corrected. The database enforces the same (trg_guard_holiday_change). */
@@ -7497,10 +7513,10 @@ function holidaysCardHTML(year){
       : '<div class="empty">No holidays added for '+year+'.</div>')+
     '<p class="tiny muted" style="margin-top:10px">Sunday is the weekly off and is not listed. Saturdays and holidays are optional working days: '+
       'nobody is marked absent for them, and working one (punch in and out) earns 1 Earned Leave. '+
-      (can ? 'Holidays can be added for future dates only; past holidays keep their date.' : 'Only a Partner can add or change holidays.')+'</p></div>';
+      (can ? 'Holidays can be added for future dates only; past holidays keep their date.' : 'Only Partners, Managers and Assistant Managers can add or change holidays.')+'</p></div>';
 }
 function holidayForm(id){
-  if(!CAN.manageHolidays()) return toast("Only a Partner can add or change holidays");
+  if(!CAN.manageHolidays()) return toast("Only Partners, Managers and Assistant Managers can add or change holidays");
   const h = id ? HOLIDAYS.find(x=>x.id===id) : null;
   if(id && !h) return toast("That holiday no longer exists — refresh the page");
   const locked = holidayLocked(h);
@@ -7514,7 +7530,7 @@ function holidayForm(id){
     '<button class="btn" id="hfSave" onclick="saveHoliday('+(h?'\''+h.id+'\'':'')+')">'+(h?'Save changes':'Add holiday')+'</button></div>');
 }
 async function saveHoliday(id){
-  if(!CAN.manageHolidays()) return toast("Only a Partner can add or change holidays");
+  if(!CAN.manageHolidays()) return toast("Only Partners, Managers and Assistant Managers can add or change holidays");
   const h = id ? HOLIDAYS.find(x=>x.id===id) : null;
   const date = $("#hfDate").value, name = $("#hfName").value.trim(), description = $("#hfDesc").value.trim();
   if(!date || !validISODate(date)) return toast("Choose the holiday date");
@@ -7534,14 +7550,14 @@ async function saveHoliday(id){
     : await supabase.from("holidays").insert({ organization_id:ORG_ID, ...fields }).select("*").single();
   btn.disabled=false;
   if(error) return toast(error.code==="23505" ? "There is already a holiday on that date" : "Could not save the holiday — "+error.message);
-  if(!data) return toast("Could not save the holiday — only a Partner can change holidays");
+  if(!data) return toast("Could not save the holiday — only Partners, Managers and Assistant Managers can change holidays");
   const row = mapHoliday(data);
   HOLIDAYS = HOLIDAYS.filter(x=>x.id!==row.id).concat(row);
   closeModal(); toast(h ? "Holiday updated" : name+" added to everyone's calendar"); render();
 }
 function confirmDeleteHoliday(id){
   const h = HOLIDAYS.find(x=>x.id===id); if(!h) return;
-  if(!CAN.manageHolidays()) return toast("Only a Partner can delete holidays");
+  if(!CAN.manageHolidays()) return toast("Only Partners, Managers and Assistant Managers can delete holidays");
   if(holidayLocked(h)) return toast("A holiday dated today or earlier cannot be deleted");
   modal('<h3>Delete holiday?</h3><p style="margin:0 0 10px"><strong>'+esc(h.name)+'</strong> on '+fmtDate(h.date)+
     ' will be removed from every employee\'s calendar.</p>'+
@@ -7553,10 +7569,55 @@ async function deleteHoliday(id){
   const { data, error } = await supabase.from("holidays").delete().eq("id", id).select("id");
   if(btn) btn.disabled=false;
   if(error) return toast("Could not delete the holiday — "+error.message);
-  if(!data || !data.length) return toast("Could not delete the holiday — only a Partner can delete holidays");
+  if(!data || !data.length) return toast("Could not delete the holiday — only Partners, Managers and Assistant Managers can delete holidays");
   HOLIDAYS = HOLIDAYS.filter(x=>x.id!==id);
   closeModal(); toast("Holiday deleted"); render();
 }
+
+/* Live updates (046): every open app re-reads the holiday list as soon as
+   anyone adds, edits or deletes a holiday (Supabase Realtime on `holidays`),
+   and again when the tab becomes visible, in case the socket dropped. No
+   filter on the subscription — Realtime can't filter DELETE events — so any
+   event just triggers a re-read of this organization's list (RLS-scoped).
+   Before 046 is applied the channel receives nothing and the app behaves
+   as before (holidays refresh on reload). */
+let HOLIDAY_CHANNEL = null, HOLIDAY_CHANNEL_ORG = null, HOLIDAY_REFETCH_T = null, HOLIDAY_LAST_FETCH = 0;
+const holidaysKey = list => list.map(h=>h.id+"|"+h.date+"|"+h.name+"|"+h.description).sort().join("\n");
+function startHolidaySync(){
+  if(!supabase || !ORG_ID || HOLIDAY_CHANNEL_ORG===ORG_ID) return;
+  stopHolidaySync();
+  HOLIDAY_CHANNEL_ORG = ORG_ID;
+  HOLIDAY_LAST_FETCH = Date.now();
+  HOLIDAY_CHANNEL = supabase.channel("holidays-"+ORG_ID)
+    .on("postgres_changes", { event:"*", schema:"public", table:"holidays" }, scheduleHolidayRefetch)
+    .subscribe();
+}
+function stopHolidaySync(){
+  clearTimeout(HOLIDAY_REFETCH_T); HOLIDAY_REFETCH_T = null;
+  if(HOLIDAY_CHANNEL && supabase) supabase.removeChannel(HOLIDAY_CHANNEL).catch(()=>{});
+  HOLIDAY_CHANNEL = null; HOLIDAY_CHANNEL_ORG = null;
+}
+function scheduleHolidayRefetch(){
+  clearTimeout(HOLIDAY_REFETCH_T);
+  HOLIDAY_REFETCH_T = setTimeout(refetchHolidays, 400);   // one read per burst of changes
+}
+async function refetchHolidays(){
+  const org = ORG_ID;
+  if(!supabase || !org || !DATA_READY) return;
+  HOLIDAY_LAST_FETCH = Date.now();
+  const { data, error } = await supabase.from("holidays").select("*").eq("organization_id", org);
+  if(error || !data || org!==ORG_ID){ if(error) console.warn("[HOLIDAYS] refresh failed", error); return; }
+  const next = data.map(mapHoliday);
+  if(holidaysKey(next)===holidaysKey(HOLIDAYS)) return;
+  HOLIDAYS = next;
+  // Never wipe an open form or a field being typed in; the next render shows it.
+  const a = document.activeElement;
+  const typing = !!a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName);
+  if($("#veil").hidden && !typing) render();
+}
+document.addEventListener("visibilitychange", ()=>{
+  if(document.visibilityState==="visible" && HOLIDAY_CHANNEL && Date.now()-HOLIDAY_LAST_FETCH > 60000) scheduleHolidayRefetch();
+});
 
 /* =====================  DESIGNATIONS (044)  ===================== */
 /* A designation is the employee's title (designations.name) and maps to one of
@@ -7824,7 +7885,7 @@ function render(){
     $("#viewSub").textContent = "";
     $("#views").innerHTML = '<div class="view"><div class="card">'+
       '<div class="card-head"><h2>Loading '+esc(titleOf(view).toLowerCase())+'…</h2></div>'+
-      '<p class="tiny muted">Fetching the latest from Supabase.</p></div></div>';
+      '<p class="tiny muted">Fetching the latest data.</p></div></div>';
     return;
   }
   $("#viewSub").textContent   = VIEWS[view].sub();
@@ -8236,7 +8297,7 @@ async function startApp(opts){
   // Data loading includes role-aware queries (such as Partner salary history),
   // so set the verified auth UID before those queries run.
   AUTH_UID = user.id;
-  if(!quiet) renderBlockingScreen("Loading…", "Fetching your firm's data from Supabase.");
+  if(!quiet) renderBlockingScreen("Loading…", "Fetching your firm's data.");
   LOAD_ERROR = null;
   try{
     await loadAppData(myRow.organization_id,myRow.id);
@@ -8301,7 +8362,7 @@ async function initAuth(){
       }
       return;
     }
-    if(event==="SIGNED_OUT"){ me=null; LANDED_FOR=null; DATA_READY=false; AUTH_UID=null; PERSONAL_EVENTS=[]; STATUTORY_DATES=[]; STAT_CATEGORIES=[]; clearIdentityCache(); showAuthScreen("login"); return; }
+    if(event==="SIGNED_OUT"){ stopHolidaySync(); me=null; LANDED_FOR=null; DATA_READY=false; AUTH_UID=null; PERSONAL_EVENTS=[]; STATUTORY_DATES=[]; STAT_CATEGORIES=[]; clearIdentityCache(); showAuthScreen("login"); return; }
   });
 
   let session=null, sessionError=null;
@@ -8390,7 +8451,25 @@ function biAmount(v, max){
 const biShow = v => typeof v==="number" ? String(v) : biStr(v);
 
 /* Who can be picked — the same people the Add forms offer. */
-const biPartnerChoices = () => staff().filter(p=>rank(p.id)>=MANAGER_RANK);          // clientForm(): Relationship partner
+/* Relationship partner: any active employee of any designation (built-in or
+   custom, 044) — it marks who handles the client and grants no access.
+   Highest level first, then by name. Same list as clientForm(). */
+const relPartnerChoices = () => staff().slice().sort((a,b)=>rank(b.id)-rank(a.id) || a.name.localeCompare(b.name));
+const biPartnerChoices = relPartnerChoices;
+/* "Name — Designation (CODE)": biCodeOf() reads the code in the last brackets. */
+const biPartnerChoice = p => p.name+(desigName(p)?" — "+desigName(p):"")+" ("+p.code+")";
+/* Import cell -> employee code: "… (CODE)", a bare code, or an exact full name
+   when exactly one active employee has it. Anything else is sent as typed and
+   the server reports it as not found. */
+function biPartnerCodeOf(v){
+  const s=biStr(v); if(!s) return "";
+  if(/\(([^()]+)\)\s*$/.test(s)) return biCodeOf(s);
+  const all=relPartnerChoices();
+  const byCode=all.find(p=>String(p.code).toLowerCase()===s.toLowerCase());
+  if(byCode) return byCode.code;
+  const byName=all.filter(p=>p.name.trim().toLowerCase()===s.toLowerCase());
+  return byName.length===1 ? byName[0].code : s;
+}
 const biBossChoices = () => ALL_PEOPLE.filter(x=>x.active);                // personForm(): Reports to
 
 const BI_KINDS = {
@@ -8398,16 +8477,16 @@ const BI_KINDS = {
     title:"Import clients", noun:"client", nouns:"clients", sheet:"Clients", file:"client",
     can:()=>CAN.manageClients(), denied:"Assistant Manager and above can add clients",
     columns:()=>{
-      const partners=biPartnerChoices().map(biChoice);
+      const partners=biPartnerChoices().map(biPartnerChoice);
       return [
         { key:"code", header:"Short code", req:true, width:13, kind:"text",
           help:"2–8 letters or digits, no spaces (saved in capitals). It becomes the first part of every job code for this client, so keep it brief and stable. Must not already be used by another client.",
           allowed:"A–Z and 0–9, 2 to 8 characters", ex:["ACME","RKS01"] },
         { key:"name", header:"Client name", req:true, width:34, kind:"text",
           help:"The client's full name.", allowed:"Text", ex:["Acme Industries Pvt Ltd","R K Sharma"] },
-        { key:"type", header:"Type", req:false, width:16, kind:"list", list:CLIENT_TYPES.slice(),
-          help:'The kind of entity. Leave blank for "Private Ltd" (the Add Client default).',
-          ex:["Private Ltd","Individual"] },
+        { key:"type", header:"Type", req:false, width:16, kind:"list", list:clientTypeOptions(), openList:true,
+          help:'The kind of entity. Pick a suggestion or type any other (e.g. OPC, Section 8 Company, AOP, BOI), up to '+CLIENT_TYPE_MAX+' characters. Leave blank for "Private Ltd" (the Add Client default).',
+          ex:["Private Ltd","OPC"] },
         { key:"pan", header:"PAN", req:false, width:14, kind:"text",
           help:"Optional. 10 characters: 5 letters, 4 digits, 1 letter.", allowed:"e.g. AABCS1234K", ex:["AABCA1234K","ABCPS1234D"] },
         { key:"gstin", header:"GSTIN", req:false, width:19, kind:"text",
@@ -8416,8 +8495,8 @@ const BI_KINDS = {
           help:"Optional. Must be a valid email address.", allowed:"name@example.com", ex:["accounts@acme.example",""] },
         { key:"phone", header:"Phone", req:false, width:17, kind:"text",
           help:"Optional. Any format.", allowed:"Text", ex:["+91 98200 00000",""] },
-        { key:"partner", header:"Relationship partner", req:true, width:30, kind:"list", list:partners,
-          help:"An active Assistant Manager, Manager or Partner. Pick from the dropdown, or type just their employee code.",
+        { key:"partner", header:"Relationship partner", req:true, width:30, kind:"list", list:partners, openList:true,
+          help:"The person handling this client — any active employee of any designation. Pick from the dropdown, or type their employee code or exact full name.",
           ex:[partners[0]||"Partner Name (P001)", partners[1]||partners[0]||"Partner Name (P001)"] }
       ];
     }
@@ -8470,9 +8549,9 @@ function biTemplateSheets(kind){
     cols:cols.map(c=>({ width:c.width, style:colStyle(c) })),
     validations:cols.map((c,i)=>{
       const sqref=biColName(i+1)+"2:"+biColName(i+1)+last;
-      if(c.kind==="list") return { type:"list", sqref, warnOnly:!!c.warnOnly,
+      if(c.kind==="list") return { type:"list", sqref, warnOnly:!!c.warnOnly, openList:!!c.openList,
         list:c.list.length ? "Lists!$"+listCol[c.key]+"$2:$"+listCol[c.key]+"$"+(c.list.length+1) : null,
-        promptTitle:c.header, prompt:c.help, error:"Choose a value from the list (see the Lists sheet)." };
+        promptTitle:c.header, prompt:c.help, error:c.openList ? "Not one of the suggestions — it will be imported exactly as typed." : "Choose a value from the list (see the Lists sheet)." };
       if(c.kind==="date") return { type:"date", sqref, promptTitle:c.header, prompt:c.help, error:"Enter a valid date, e.g. 01-Apr-2026." };
       if(c.kind==="money") return { type:"decimal", sqref, max:c.max, promptTitle:c.header, prompt:c.help, error:"Enter a number of 0 or more." };
       return null;
@@ -8500,7 +8579,7 @@ function biTemplateSheets(kind){
       .concat(steps.map((t,i)=>[{v:(i+1)+".",s:S.boldWrap},{v:t,s:S.wrap}]))
       .concat([[],[ {v:"Column",s:S.headReq},{v:"Mandatory",s:S.headReq},{v:"What to enter",s:S.headReq},{v:"Permitted values / format",s:S.headReq} ]])
       .concat(cols.map(c=>[ {v:c.header,s:S.boldWrap}, {v:c.req?"Yes":"No",s:S.wrap}, {v:c.help,s:S.wrap},
-        {v:c.kind==="list" ? (c.list.length<=12 && c.list.length ? c.list.join(", ") : 'Dropdown — '+c.list.length+' values on the "Lists" sheet')+(c.warnOnly?" (or a code from this file)":"") : c.allowed, s:S.wrap} ])) };
+        {v:c.kind==="list" ? (c.list.length<=12 && c.list.length ? c.list.join(", ") : 'Dropdown — '+c.list.length+' values on the "Lists" sheet')+(c.warnOnly?" (or a code from this file)":"")+(c.openList?" — or type any other":"") : c.allowed, s:S.wrap} ])) };
 
   const ex={ name:"Examples", freeze:true, headerHeight:30,
     rows:[cols.map(c=>({ v:c.header+(c.req?" *":""), s:c.req?S.headReq:S.headOpt }))]
@@ -8718,7 +8797,7 @@ function biClientRecords(rows){
   return rows.map(r=>({ row:r.row, raw:r.v, status:"pending", reason:"", warnings:[],
     payload:{ row:r.row, code:biStr(r.v.code).toUpperCase(), name:biStr(r.v.name), type:biStr(r.v.type),
       pan:biStr(r.v.pan).toUpperCase(), gstin:biStr(r.v.gstin).toUpperCase(), email:biStr(r.v.email),
-      phone:biShow(r.v.phone), partner:biCodeOf(r.v.partner) } }));
+      phone:biShow(r.v.phone), partner:biPartnerCodeOf(r.v.partner) } }));
 }
 /* Server results -> records. Also catches what one request can't see: the
    same code / PAN in two different requests of the same file. */
