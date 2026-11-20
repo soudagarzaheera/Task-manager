@@ -1111,6 +1111,7 @@ async function loadAppData(orgId, currentProfileId){
   else schedulesR.data.forEach(r=>{ SCHEDULES[r.id] = scheduleFromRow(r); });
   await loadAttendanceOverrides();
   await loadBalancedLeave();
+  await loadDayQueries();
 
   SALARY_HISTORY = [];
   if(profilesR.data.some(p=>p.role==="partner" && p.auth_user_id===AUTH_UID)){
@@ -1705,8 +1706,14 @@ function jobCodeClash(code, scheduleId, exceptId){
   return ALL_JOBS.find(j=>j.id!==exceptId && j.code.trim().toUpperCase()===c &&
     !(scheduleId && j.scheduleId===scheduleId)) || null;
 }
-/* Job code as shown in pickers: scheduled jobs share a code, so add the date. */
-const jobPickLabel = j => j.code+(isScheduled(j) && j.period ? " · "+j.period : "");
+/* Job code as shown in pickers: the full client name first (codes alone are
+   hard to recognise), then the code; scheduled jobs share a code, so add the date. */
+/* Time can be booked only to a job you work on: one with a task assigned to
+   you, one you are the Responsible Partner of, or a firm (non-chargeable)
+   code such as FIRM/ADMIN, which everyone may use. */
+const canLogTimeTo = j => !!j && (j.overhead || j.partner===me || TASKS.some(t=>t.job===j.id && t.who===me));
+const jobClientName = j => (j && j.client && clientOf(j.client).name) || "";
+const jobPickLabel = j => (jobClientName(j) ? jobClientName(j)+" · " : "")+j.code+(isScheduled(j) && j.period ? " · "+j.period : "");
 
 function dueTag(d){
   const n=daysTo(d);
@@ -1734,12 +1741,12 @@ const taskDueTag = t => t.status==="completed" ? '<span class="tag ok">Done</spa
 
 const STATUS_LABEL = {
   todo:"To do", in_progress:"In progress", 
-  // blocked_on_client:"Waiting on client",
-  // submitted_for_review:"For review", 
+  blocked_on_client:"Waiting on client",
+  submitted_for_review:"For review", 
   changes_requested:"Changes asked", 
   completed:"Done",
   open:"Open", 
-  // under_review:"Under review", 
+  under_review:"Under review", 
   closed:"Closed"
 };
 
@@ -2085,6 +2092,64 @@ function groupsFor(who, week=WEEK){
 }
 
 let NIL_FILED = [];   // {who, week} - a week with nothing booked still goes on record
+/* Day-wise timesheet queries (057): one row per query round on one
+   employee's date. Read-only from the browser - rounds are opened, moved and
+   closed by the database as entries change status. */
+let TS_QUERIES = [];
+let TS_QUERIES_READY = false;          // false until 057 is installed
+async function loadDayQueries(){
+  const { data, error } = await supabase.from("timesheet_day_queries").select("*")
+    .eq("organization_id", ORG_ID).order("work_date").order("round");
+  if(error){ TS_QUERIES = []; TS_QUERIES_READY = false;
+    console.warn("[DATA] timesheet_day_queries unavailable - run 057_timesheet_day_queries.sql", error.message); return; }
+  TS_QUERIES_READY = true;
+  TS_QUERIES = data.map(q=>({ id:q.id, who:q.profile_id, date:q.work_date, week:q.week_start_date, round:q.round,
+    status:q.status, raisedBy:q.raised_by, raisedAt:q.raised_at, reason:q.reason||"",
+    original:q.original_entries||[], response:q.response||"", respondedAt:q.responded_at,
+    resubmittedAt:q.resubmitted_at, resubmitted:q.resubmitted_entries||null,
+    resolution:q.resolution, resolutionNote:q.resolution_note||"", resolvedBy:q.resolved_by, resolvedAt:q.resolved_at }));
+}
+const dayQueries   = (who, date) => TS_QUERIES.filter(q=>q.who===who && q.date===date).sort((a,b)=>a.round-b.round);
+const openDayQuery = (who, date) => dayQueries(who, date).find(q=>q.status==="open"||q.status==="responded") || null;
+const liveDayQuery = (who, date) => dayQueries(who, date).find(q=>q.status!=="closed") || null;
+
+/* One date of one person = the unit of approval (057). Day status from its
+   submitted entries (drafts are still the employee's):
+   queried > pending > approved. */
+function dayApprovalStatus(who, date){
+  const rows = entriesOnDate(who, date).filter(r=>r.status!=="draft");
+  if(!rows.length) return null;
+  if(rows.some(r=>r.status==="queried")) return "queried";
+  if(rows.some(r=>r.status==="pending")){
+    const q = liveDayQuery(who, date);
+    return q && q.status==="resubmitted" ? "resubmitted" : "pending";
+  }
+  return "approved";
+}
+const DAY_STATUS_LABEL = { queried:"Query raised", pending:"Pending approval", resubmitted:"Resubmitted", approved:"Approved" };
+const DAY_STATUS_TAG   = { queried:"bad", pending:"warn", resubmitted:"warn", approved:"ok" };
+const dayStatusTag = st => st ? '<span class="tag '+DAY_STATUS_TAG[st]+'">'+DAY_STATUS_LABEL[st]+'</span>' : '';
+/* Submitted dates of a person's week, oldest first. */
+const submittedDates = (who, week) =>
+  [...new Set(entriesFor(who, week).filter(r=>r.status!=="draft").map(dateOf))].sort();
+/* Week status from its days - never overrides a day's own status. */
+function weekApprovalStatus(who, week){
+  const sts = submittedDates(who, week).map(d=>dayApprovalStatus(who, d));
+  if(!sts.length) return null;
+  if(sts.includes("queried")) return "Action required";
+  // "Week approved" only once every working day is logged (or excused) and
+  // nothing is left in draft - approved days alone are only part of the week.
+  if(sts.every(s=>s==="approved"))
+    return weekComplete(who, week) ? "Week approved" : "Partially approved";
+  if(sts.includes("approved")) return "Partially approved";
+  return "Pending approval";
+}
+/* Every working day of the week has time or is excused (holiday / leave),
+   and no time is still in draft. */
+const weekComplete = (who, week) =>
+  firstOpenDay(who, week)===null && !entriesFor(who, week).some(r=>r.status==="draft");
+const WEEK_STATUS_TAG = { "Action required":"bad", "Week approved":"ok", "Partially approved":"warn", "Pending approval":"warn" };
+const weekStatusTag = st => st ? '<span class="tag '+WEEK_STATUS_TAG[st]+'">'+st+'</span>' : '';
 let HALF_DAYS = [];   // {who, date} - timesheet_half_days (045): minimum 4h instead of 8h
 
 /* Minimum hours per submitted day (from OPTIONAL_DAYS_FROM): 8, or 4 on a
@@ -2128,7 +2193,7 @@ function dayHoursHTML(week){
   const dates=[...new Set(entriesFor(me,week).map(dateOf))].sort();
   if(!dates.length) return "";
   return '<div class="card" style="margin-bottom:14px"><div class="card-head"><h2>Hours per day</h2></div>'+
-    '<table><thead><tr><th>Day</th><th class="r">Booked</th><th class="r">Minimum</th><th>Half day</th><th class="r"></th></tr></thead><tbody>'+
+    '<table><thead><tr><th>Day</th><th>Approval</th><th class="r">Booked</th><th class="r">Minimum</th><th>Half day</th><th class="r"></th></tr></thead><tbody>'+
     dates.map(d=>{
       const total=dayTotalHours(me,d), ruled=d>=OPTIONAL_DAYS_FROM, min=dayMinimumHours(me,d);
       const submitted=entriesOnDate(me,d).some(x=>x.status==="pending"||x.status==="approved");
@@ -2141,7 +2206,11 @@ function dayHoursHTML(week){
       const st = !ruled ? '<span class="muted tiny">no minimum</span>'
         : total>=min ? '<span class="tag ok">ok</span>'
         : '<span class="tag bad">'+hrs(min-total)+'h short</span>';
-      return '<tr><td class="num">'+weekdayDate(d)+'</td><td class="r num">'+hrs(total)+'h</td>'+
+      const dst = dayApprovalStatus(me,d);
+      return '<tr><td class="num">'+weekdayDate(d)+'</td>'+
+        '<td>'+(dst ? '<button class="text-link" onclick="showTimesheetDayDetail(\''+me+'\',\''+d+'\')">'+dayStatusTag(dst)+'</button>'
+                    : '<span class="tiny muted">not submitted</span>')+'</td>'+
+        '<td class="r num">'+hrs(total)+'h</td>'+
         '<td class="r num">'+(ruled?min+'h':'-')+'</td><td>'+sw+'</td><td class="r">'+st+'</td></tr>';
     }).join("")+'</tbody></table>'+
     '<p class="tiny muted" style="margin-top:9px">A submitted day needs at least '+MIN_FULL_DAY_HOURS+' hours. '+
@@ -2160,7 +2229,8 @@ function sheetStatusFor(who, wk){
   if(s.has("pending")) return "submitted";
   if(s.has("approved") && s.has("queried")) return "partly approved";
   if(s.has("queried")) return "sent back";
-  return "approved";
+  // all logged time approved, but working days of the week still without time
+  return firstOpenDay(who, wk)===null ? "approved" : "partly approved";
 }
 const STATUS_TAG = {
   "approved":"ok", "partly approved":"warn", "submitted":"warn",
@@ -2173,8 +2243,9 @@ const STATUS_TAG = {
 const CAN = {
   logTime:        ()      => true,
   selfCertify:    (id=me) => person(id).role==="partner",
-  approveSheet:   (owner) => owner!==me &&
-                             (person(owner).reportsTo===me || (rank()>=90 && rank(owner)<90)),
+  /* 056: Partner for any non-partner; Assistant Manager / Manager for anyone
+     below them in the reporting line. Same rule as approval_can_decide(). */
+  approveSheet:   (owner) => canDecideFor(me, owner),
   requestBudget:  ()      => person(me).role!=="partner",
   /* Partners may book beyond a job's budget; everyone else is held to it.
      Same rule as enforce_job_budget_limit() (024). */
@@ -2201,7 +2272,7 @@ const CAN = {
   /* Team attendance: Assistant Manager and above (051). Partners see everyone;
      Assistant Managers / Managers only people who work under them, today. */
   seeTeamAtt:     ()      => rank()>=MANAGER_RANK,
-  approveClaim:   (c)     => c.who!==me && rank()>=MANAGER_RANK,
+  approveClaim:   (c)     => !!c && canDecideFor(me, c.who),
   /* Claim payment: Assistant Manager and above (never their own claim), or a
      legacy "accounts" profile. Same boundary as expense_claims_update and
      guard_expense_claim() (036). */
@@ -2238,11 +2309,13 @@ const CAN = {
   overrideAttendance: ()  => person(me).role==="partner" && !!person(me).active,
   viewSalary:     ()      => person(me).role==="partner"
 };
-/* The Approvals page: Senior Executive and above, a legacy "accounts" profile,
-   or anyone with a direct report - so a supervisor of any designation can
-   reach the timesheets CAN.approveSheet() lets them decide. */
-const anyApprovals = () => rank()>=50 || person(me).role==="accounts" ||
-  PEOPLE.some(p=>p.active && p.reportsTo===me);
+/* The Approvals page is open to every employee (056). What each person sees
+   and may decide is scoped by canViewRequestsOf() / canDecideFor() here, and
+   by approval_can_view() / approval_can_decide() in the database. */
+const anyApprovals = () => !!me;
+/* Does this person approve anything at all? (Assistant Manager and above,
+   or a legacy "accounts" profile that marks claims paid.) */
+const isApprover = () => rank()>=MANAGER_RANK || person(me).role==="accounts";
 
 /* Reporting line traversal: direct supervisor or higher in tree */
 function isAssignedUnder(who, bossId){
@@ -2257,16 +2330,25 @@ function isAssignedUnder(who, bossId){
   return false;
 }
 
+/* The one approver rule (056, mirrors approval_can_decide() in the database):
+   never your own request; a Partner decides for any non-partner; an Assistant
+   Manager or Manager decides for anyone below them in the reporting line
+   (direct reports and their reports). Nobody else decides. */
+function canDecideFor(viewerId, owner){
+  if(!viewerId || !owner || owner === viewerId) return false;
+  if(rank(viewerId) >= RANK.partner) return rank(owner) < RANK.partner;
+  return rank(viewerId) >= MANAGER_RANK && isAssignedUnder(owner, viewerId);
+}
+/* Whose requests may a viewer see (mirrors approval_can_view()): their own,
+   everyone for a Partner, and people below an Assistant Manager / Manager. */
+function canViewRequestsOf(viewerId, owner){
+  if(!viewerId || !owner) return false;
+  if(owner === viewerId || rank(viewerId) >= RANK.partner) return true;
+  return rank(viewerId) >= MANAGER_RANK && isAssignedUnder(owner, viewerId);
+}
+
 function canApproveLeaveRequest(viewerId, who, r){
-  if(!viewerId || !who) return false;
-  if(who === viewerId) return false;
-  const vRole = person(viewerId).role;
-  if(vRole === "partner" && person(who).role !== "partner") return true;
-  const isSupervisor = (person(who).reportsTo === viewerId) || isAssignedUnder(who, viewerId);
-  if(isSupervisor && rank(viewerId) >= 50){
-    return true;
-  }
-  return false;
+  return canDecideFor(viewerId, who);
 }
 
 /* Period-specific responsibility check:
@@ -2283,9 +2365,9 @@ function canSeeLeaveRequest(viewerId, r){
   // If viewer was the designated approver/decision-maker during their period of responsibility
   if(r.approvedBy && r.approvedBy === viewerId) return true;
 
-  const currentlyAssigned = (person(r.who).reportsTo === viewerId) || isAssignedUnder(r.who, viewerId);
+  const currentlyAssigned = isAssignedUnder(r.who, viewerId);
 
-  if(currentlyAssigned && rank(viewerId) >= 50){
+  if(currentlyAssigned && rank(viewerId) >= MANAGER_RANK){
     if(r.status === "pending") return true;
     // If decided by a different supervisor (below partner) in an earlier period, hide from current one
     if(r.approvedBy && r.approvedBy !== viewerId){
@@ -2303,11 +2385,13 @@ function canSeeLeaveRequest(viewerId, r){
    has at least one pending (submitted, undecided) entry - from any week, not
    only the current one, and even if the person has since added new drafts to
    that week. Oldest week first. Returns [{p, week}]. */
-function pendingSheets(){
+function pendingSheets(withQueried){
   const out=[];
   staff().forEach(p=>{
     if(!CAN.approveSheet(p.id)) return;
-    const weeks=new Set(ENTRIES.filter(x=>x.who===p.id && x.status==="pending").map(x=>x.week));
+    // withQueried: also weeks whose only open days are queried (shown so the
+    // approver can follow or resolve them; not counted as "waiting on you").
+    const weeks=new Set(ENTRIES.filter(x=>x.who===p.id && (x.status==="pending" || (withQueried && x.status==="queried"))).map(x=>x.week));
     [...weeks].forEach(week=>out.push({p, week}));
   });
   return out.sort((a,b)=>a.week<b.week?-1:a.week>b.week?1:a.p.name.localeCompare(b.p.name));
@@ -2327,48 +2411,116 @@ function pendingClaims(){
 }
 
 /* ------------------  APPROVAL HISTORY (accepted / rejected)  ------------------
-   Same authorization funcs as the pending lists above - a decided request is
-   visible to whoever was allowed to decide it, never to everyone. "queried"
-   is this app's reject-equivalent for a timesheet line (sent back with a
-   reason, same as budget/claim rejection); there is no separate terminal
-   "rejected" timesheet status, so history groups it under Rejected. */
+   Scoped by canViewRequestsOf() (056): your own requests, everyone's for a
+   Partner, and people below you for an Assistant Manager / Manager. A
+   decision you recorded stays visible to you after the person moves to
+   another manager. "queried" is this app's reject-equivalent for a
+   timesheet line (sent back with a reason), so history groups it under
+   Rejected. */
 function decidedGroupsFor(status){                 // status: "approved" | "queried"
   const out=[];
-  staff().forEach(p=>{
-    if(!CAN.approveSheet(p.id)) return;
-    const byWeek={};
-    ENTRIES.filter(x=>x.who===p.id).forEach(x=>{ (byWeek[x.week]=byWeek[x.week]||[]).push(x); });
-    Object.keys(byWeek).forEach(wk=>{
-      const g={};
-      byWeek[wk].forEach(x=>{ (g[x.job]=g[x.job]||[]).push(x); });
-      Object.keys(g).forEach(jid=>{
-        const rows=g[jid], sts=[...new Set(rows.map(r=>r.status))];
-        if(sts.length===1 && sts[0]===status){
-          out.push({ person:p, job:jid, week:wk, rows,
-            hours:sum(rows.map(r=>+r.hours||0)),
-            query:(rows.find(r=>r.query)||{}).query||"",
-            decidedBy:rows[0].decidedBy, decidedAt:rows[0].decidedAt });
-        }
-      });
+  // Everyone on record, not only active staff: a deactivated employee's
+  // decided timesheets stay in the history. One item per DATE (057); only
+  // the entries carrying this decision count, so a later draft or a pending
+  // entry on the same date never hides what was decided.
+  PEOPLE.forEach(p=>{
+    const mayView = canViewRequestsOf(me, p.id);
+    const byDate={};
+    ENTRIES.filter(x=>x.who===p.id && x.status===status).forEach(x=>{ const d=dateOf(x); (byDate[d]=byDate[d]||[]).push(x); });
+    Object.keys(byDate).forEach(date=>{
+      const rows=byDate[date];
+      if(!(mayView || rows.some(r=>r.decidedBy===me))) return;
+      const last=rows.slice().sort((a,b)=>(b.decidedAt||"")<(a.decidedAt||"")?-1:1)[0];
+      out.push({ person:p, date, week:mondayOfISO(date), rows, jobs:[...new Set(rows.map(r=>r.job))],
+        hours:sum(rows.map(r=>+r.hours||0)),
+        query:(rows.find(r=>r.query)||{}).query||"",
+        decidedBy:last.decidedBy, decidedAt:last.decidedAt });
     });
   });
-  return out.sort((a,b)=> (b.decidedAt||b.week) < (a.decidedAt||a.week) ? -1 : 1);
+  return out.sort((a,b)=> (b.decidedAt||b.date) < (a.decidedAt||a.date) ? -1 : 1);
 }
-/* Budget/claim history is only shown to the ranks authorized to decide them
-   (CAN.approveBudget / CAN.approveClaim / CAN.payClaim) - same gate as the
-   pending lists, just without the "not your own" nuance, which only matters
-   for who may *decide*, not who may see what was already decided. */
-function decidedBudgets(status){ return BUDGET_REQUESTS.filter(b=>b.status===status && rank()>=MANAGER_RANK); }
-function acceptedClaims(){ return CLAIMS.filter(c=>(c.status==="approved"||c.status==="paid") && (rank()>=MANAGER_RANK || CAN.payClaim())); }
-function rejectedClaims(){ return CLAIMS.filter(c=>c.status==="rejected" && rank()>=MANAGER_RANK); }
+/* Budget increases belong to a job, not a reporting line: their history stays
+   with the ranks that decide them (CAN.approveBudget), plus the requester. */
+function decidedBudgets(status){ return BUDGET_REQUESTS.filter(b=>b.status===status && (b.by===me || rank()>=MANAGER_RANK)); }
+/* A claim is visible to its owner, the hierarchy above them, partners, whoever
+   decided or paid it, and - once approved - whoever may mark it paid. Same
+   rule as expense_claims_select (056). */
+function claimVisible(c){
+  return c.who===me || canViewRequestsOf(me, c.who) || c.approvedBy===me || c.paidBy===me ||
+    ((c.status==="approved" || c.status==="paid") && CAN.payClaim());
+}
+function acceptedClaims(){ return CLAIMS.filter(c=>(c.status==="approved"||c.status==="paid") && claimVisible(c)); }
+function rejectedClaims(){ return CLAIMS.filter(c=>c.status==="rejected" && claimVisible(c)); }
+
+/* Your own requests that are still waiting on someone else. */
+function myPendingSheets(){
+  const dates=[...new Set(ENTRIES.filter(x=>x.who===me && (x.status==="pending"||x.status==="queried")).map(dateOf))].sort();
+  return dates.map(date=>({ date, week:mondayOfISO(date), status:dayApprovalStatus(me, date),
+    hours:sum(entriesOnDate(me, date).filter(r=>r.status!=="draft").map(r=>+r.hours||0)) }));
+}
+const myPendingLeave   = () => leaveRequestsFor(me).filter(r=>r.status==="pending").map(r=>Object.assign({person:person(me)}, r));
+const myPendingClaims  = () => CLAIMS.filter(c=>c.who===me && (c.status==="submitted" || c.status==="approved"));
+const myPendingBudgets = () => BUDGET_REQUESTS.filter(b=>b.by===me && b.status==="pending");
+
+/* Who will decide a request from `owner`: the nearest Assistant Manager /
+   Manager above them in the reporting line, and the partners. */
+function approverHint(owner){
+  let cur = person(owner).reportsTo, depth = 0, near = null;
+  while(cur && depth++ < 20){
+    if(rank(cur) >= MANAGER_RANK && rank(cur) < RANK.partner){ near = cur; break; }
+    if(rank(cur) >= RANK.partner) break;
+    cur = person(cur).reportsTo;
+  }
+  if(rank(owner) >= RANK.partner) return "self-certified";
+  return near ? person(near).name+" or a partner" : "a partner";
+}
+
+/* ---- Partner filters on the Approvals screen (employee, company, approver,
+   request type). Status is the Pending / Accepted / Rejected tabs. The
+   organization has no department field, so "Company" is the department. */
+const AP_TYPES = [["all","All types"],["timesheet","Timesheets"],["leave","Leave"],["claim","Expense claims"],["budget","Budget increases"]];
+let APF = { emp:"all", company:"all", approver:"all", type:"all" };
+const apFiltersOn = () => person(me).role==="partner";
+function setApFilter(k, v){ APF[k] = v || "all"; render(); }
+function resetApFilters(){ APF = { emp:"all", company:"all", approver:"all", type:"all" }; render(); }
+function apKeep(type, owner, approver){
+  if(!apFiltersOn()) return true;
+  if(APF.type!=="all" && APF.type!==type) return false;
+  if(APF.emp!=="all" && owner!==APF.emp) return false;
+  if(APF.company!=="all" && person(owner).companyId!==APF.company) return false;
+  if(APF.approver!=="all" && approver!==APF.approver) return false;
+  return true;
+}
+/* Everything the Approvals screen lists, already scoped and filtered. */
+function apPending(){
+  const r = {
+    sheets:  pendingSheets(true).filter(x=>apKeep("timesheet", x.p.id, null)),
+    budgets: pendingBudgets().filter(b=>apKeep("budget", b.by, null)),
+    claims:  pendingClaims().filter(c=>apKeep("claim", c.who, null)),
+    leaves:  pendingLeaveRequests().filter(l=>apKeep("leave", l.who, null)),
+    mySheets:  myPendingSheets().filter(()=>apKeep("timesheet", me, null)),
+    myLeaves:  myPendingLeave().filter(()=>apKeep("leave", me, null)),
+    myClaims:  myPendingClaims().filter(()=>apKeep("claim", me, null)),
+    myBudgets: myPendingBudgets().filter(()=>apKeep("budget", me, null))
+  };
+  r.total = Object.values(r).reduce((n,a)=>n+a.length,0);
+  return r;
+}
+function apHistory(accepted){
+  const r = {
+    groups:  decidedGroupsFor(accepted?"approved":"queried").filter(g=>apKeep("timesheet", g.person.id, g.decidedBy)),
+    budgets: decidedBudgets(accepted?"approved":"rejected").filter(b=>apKeep("budget", b.by, b.decidedBy)),
+    claims:  (accepted?acceptedClaims():rejectedClaims()).filter(c=>apKeep("claim", c.who, c.approvedBy)),
+    leaves:  decidedLeaveRequests(accepted?"approved":"rejected").filter(l=>apKeep("leave", l.who, l.approvedBy))
+  };
+  r.total = r.groups.length + r.budgets.length + r.claims.length + r.leaves.length;
+  return r;
+}
 
 function approvalCounts(){
-  return {
-    pending:  approvalCount(),
-    accepted: decidedGroupsFor("approved").length + decidedBudgets("approved").length + acceptedClaims().length + decidedLeaveRequests("approved").length,
-    rejected: decidedGroupsFor("queried").length  + decidedBudgets("rejected").length + rejectedClaims().length + decidedLeaveRequests("rejected").length
-  };
+  return { pending: apPending().total, accepted: apHistory(true).total, rejected: apHistory(false).total };
 }
+/* The sidebar badge: only what is waiting on YOU to decide. */
 const approvalCount = () => pendingSheets().length + pendingBudgets().length + pendingClaims().length + pendingLeaveRequests().length;
 
 /* ------------------  LEAVE  ------------------
@@ -2407,8 +2559,7 @@ function pendingLeaveRequests(){
 
 function decidedLeaveRequests(status){                // status: "approved" | "rejected"
   const out=[];
-  staff().forEach(p=>{
-    if(p.id === me) return;
+  PEOPLE.forEach(p=>{                                 // includes your own (canSeeLeaveRequest) and deactivated staff
     leaveRequestsFor(p.id).filter(r=>r.status===status).forEach(r=>{
       if(canSeeLeaveRequest(me, r)){
         out.push(Object.assign({person:p},r));
@@ -2496,7 +2647,7 @@ function leaveBalanceFor(who, year, asOf){
   });
 }
 /* ---------------  Balanced Leave (BL, 050)  ---------------
-   1 BL is credited by the database for every month with no approved leave
+   1 BL is credited by the database for every month with aleave
    (run_balanced_leave_accrual, scheduled). Approved BL is deducted by the
    database; partners adjust through adjust_balanced_leave(). The app only
    reads balances / the ledger - nothing here computes a credit. RLS returns
@@ -2832,10 +2983,13 @@ VIEWS.mytime = {
     // only the chosen date can be locked - never the rest of its week
     const locked = dateSubmitted(me,TIMESHEET_DATE);
 
-    let h = '<div class="card"><div class="card-head">'+
+    // Open queries come first - on any week, not only the one being viewed.
+    let h = myQueriesHTML();
+    // No week status here: each day's status is in the "Hours per day" table,
+    // and decided time is listed under Approvals.
+    h += '<div class="card"><div class="card-head">'+
       '<h2>'+esc(person(me).name)+'</h2>'+
-      '<span class="code">'+person(me).label+'</span><span class="spacer"></span>'+
-      '<span class="tag '+STATUS_TAG[st]+'">'+st+'</span></div>';
+      '<span class="code">'+person(me).label+'</span><span class="spacer"></span></div>';
 
     /* week summary bar */
     h += '<div style="display:flex;gap:24px;flex-wrap:wrap;align-items:baseline;margin-bottom:14px">'+
@@ -2871,8 +3025,8 @@ VIEWS.mytime = {
     }
     h += '</div></div>';
 
-    /* anything queried comes back with the reason attached */
-    const queried = groupsFor(me,TIMESHEET_WEEK).filter(g=>g.status==="queried");
+    /* Before 057 is installed a queried entry has no query round - show its reason here. */
+    const queried = TS_QUERIES_READY ? [] : groupsFor(me,TIMESHEET_WEEK).filter(g=>g.status==="queried");
     if(queried.length) h += '<div class="card" style="border-color:var(--red)">'+
       '<div class="card-head"><h2>Sent back to you</h2></div>'+
       queried.map(g=>'<div class="line queried"><div class="line-top">'+
@@ -2904,7 +3058,7 @@ function taskTag(r){
 function quickHTML(locked, week=WEEK){
   const groups = groupsFor(me,week);
   const disabled=locked?" disabled":"";
-  const openJobs = JOBS.filter(j=>j.status!=="closed");
+  const openJobs = JOBS.filter(j=>j.status!=="closed" && canLogTimeTo(j));
   let h = '<div class="card" style="background:var(--paper);margin-bottom:14px">'+
     '<div class="eyebrow" style="margin-bottom:9px">Log time</div>'+
     '<div class="quick">'+
@@ -2923,8 +3077,7 @@ function quickHTML(locked, week=WEEK){
       '<button class="btn" onclick="quickAdd()"'+(locked?" disabled":"")+'>Add</button>'+
     '</div>'+
     (locked?'<p class="tiny muted" style="margin-top:9px">'+fmtShort(TIMESHEET_DATE)+' is submitted and locked. Choose another date to log time - the other days of this week stay open.</p>':
-      '<p class="tiny muted" style="margin-top:9px">Review time belongs on the job you reviewed. '+
-      'Booked to FIRM/ADMIN it disappears from that job\'s cost - and yours are the expensive hours.</p>')+
+      '<p class="tiny muted" style="margin-top:9px"></p>')+
     '</div>';
 
   h += groups.length
@@ -2932,7 +3085,7 @@ function quickHTML(locked, week=WEEK){
         const cls = g.status==="approved"?"approved":g.status==="queried"?"queried":g.status==="pending"?"pending":"";
         return '<div class="line '+cls+'"><div class="line-top">'+
           '<span class="code strong">'+esc(job(g.job).code)+'</span>'+
-          '<span class="tiny muted">'+esc(job(g.job).title)+'</span>'+
+          '<span class="tiny muted">'+(jobClientName(job(g.job))?esc(jobClientName(job(g.job)))+' · ':'')+esc(job(g.job).title)+'</span>'+
           (job(g.job).overhead?'<span class="tag">non-chargeable</span>':'')+
           '<span class="spacer" style="flex:1"></span>'+
           '<span class="num strong">'+hrs(g.hours)+'h</span>'+
@@ -2942,6 +3095,8 @@ function quickHTML(locked, week=WEEK){
           '</div><div class="line-days">'+
           g.rows.map(r=>'<div class="line-day"><span class="d">'+weekdayDate(dateOf(r))+'</span>'+
             '<span class="h">'+hrs(r.hours)+'h</span>'+taskTag(r)+'<span>'+esc(r.note)+'</span>'+
+            (r.status==="queried"?'<span class="tag bad" style="margin-left:auto">query raised</span>'+
+              '<button class="btn ghost sm" onclick="editQueriedEntry(\''+r.id+'\')">Edit</button>':'')+
             (r.status!=="draft"?"":'<button class="btn ghost sm" style="margin-left:auto" onclick="dropEntry(\''+r.id+'\')">×</button>')+
             '</div>').join("")+
           '</div>'+(g.query?'<p class="tiny" style="margin-top:7px;color:var(--red)">"'+esc(g.query)+'"</p>':"")+'</div>';
@@ -3714,74 +3869,108 @@ function leavePolicyCardHTML(){
    decidedBudgets(), acceptedClaims()/rejectedClaims() above). */
 VIEWS.approvals = {
   title:"Approvals",
-  sub(){ const n=approvalCount(); return n?n+" item"+(n===1?"":"s")+" waiting on you":"Nothing waiting"; },
+  sub(){
+    const n=approvalCount();
+    if(n) return n+" item"+(n===1?"":"s")+" waiting on you";
+    return isApprover() ? "Nothing waiting" : "Your requests and their status";
+  },
   render(){
     const counts = approvalCounts();
     let h = '<div class="tabbar">'+
-      [["pending","Pending"],["accepted","Accepted"],["rejected","Rejected"]].map(([k,label])=>
+      [["pending","Pending"],["accepted","Approved"],["rejected","Rejected"]].map(([k,label])=>
         '<button class="tab" '+(approvalsTab===k?'aria-current="true"':'')+
         ' onclick="setApprovalsTab(\''+k+'\')">'+label+' <span class="count">('+counts[k]+')</span></button>'
       ).join("")+
       '</div>';
+    h += approvalFiltersHTML();
     h += approvalsTab==="pending" ? renderPendingApprovals()
        : renderApprovalHistory(approvalsTab==="accepted" ? "approved" : "rejected");
     return h;
   }
 };
 
+/* Partner-only filter bar. */
+function approvalFiltersHTML(){
+  if(!apFiltersOn()) return "";
+  const opt = (v, label, cur) => '<option value="'+esc(v)+'"'+(cur===v?" selected":"")+'>'+esc(label)+'</option>';
+  const people = PEOPLE.slice().sort((a,b)=>a.name.localeCompare(b.name));
+  const approvers = people.filter(p=>rank(p.id)>=MANAGER_RANK || p.role==="accounts");
+  const comps = activeCompanies();
+  const field = (label, key, opts) =>
+    '<label class="field" style="margin:0;min-width:160px"><span class="tiny muted">'+label+'</span>'+
+    '<select onchange="setApFilter(\''+key+'\',this.value)">'+opts+'</select></label>';
+  const on = APF.emp!=="all" || APF.company!=="all" || APF.approver!=="all" || APF.type!=="all";
+  return '<div class="card"><div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap">'+
+    field("Request type", "type", AP_TYPES.map(([v,l])=>opt(v,l,APF.type)).join(""))+
+    field("Employee", "emp", opt("all","All employees",APF.emp)+people.map(p=>opt(p.id, p.name+(p.active?"":" (inactive)"), APF.emp)).join(""))+
+    (comps.length>1 ? field("Company", "company", opt("all","All companies",APF.company)+comps.map(c=>opt(c.id, c.name, APF.company)).join("")) : "")+
+    field("Decided by", "approver", opt("all","Anyone",APF.approver)+approvers.map(p=>opt(p.id, p.name, APF.approver)).join(""))+
+    (on ? '<button class="btn ghost sm" style="margin-bottom:2px" onclick="resetApFilters()">Reset filters</button>' : '')+
+  '</div>'+
+  '<p class="tiny muted" style="margin-top:8px">Partners see every request in the organization. '+
+    '"Decided by" only matches approved and rejected items.</p></div>';
+}
+
+/* Your own requests still waiting on an approver - shown to everyone. */
+function renderMyPendingRequests(P){
+  const n = P.mySheets.length + P.myLeaves.length + P.myClaims.length + P.myBudgets.length;
+  let h = '<div class="card"><div class="card-head"><h2>Your requests</h2><span class="spacer"></span>'+
+    '<span class="eyebrow">decided by '+esc(approverHint(me))+'</span></div>';
+  if(!n){
+    return h + '<div class="empty">Nothing of yours is waiting for a decision.</div></div>';
+  }
+  const item = (onclick, left, right, tag) =>
+    '<div class="line pending" style="cursor:pointer" onclick="'+onclick+'"><div class="line-top">'+left+
+    '<span class="spacer" style="flex:1"></span>'+right+'<span class="tag warn">'+tag+'</span></div></div>';
+  h += P.mySheets.map(s=>item(
+      "showTimesheetDayDetail('"+me+"','"+s.date+"')",
+      '<span class="code">Timesheet</span><span class="strong">'+esc(weekdayDate(s.date))+'</span>',
+      '<span class="num">'+hrs(s.hours)+'h</span>', DAY_STATUS_LABEL[s.status]||"pending")).join("");
+  h += P.myLeaves.map(r=>item(
+      "showLeaveDetail('"+r.requestId+"','"+me+"')",
+      '<span class="code">Leave</span><span class="strong">'+esc(leaveTypeLabel(r.type))+'</span>'+
+      '<span class="tiny muted">'+fmtDate(r.start)+(r.end!==r.start?' – '+fmtDate(r.end):'')+'</span>',
+      '<span class="num">'+fmtDays(r.days)+'</span>', "pending")).join("");
+  h += P.myClaims.map(c=>item(
+      "showClaimDetail('"+c.id+"')",
+      '<span class="code">Expense claim</span><span class="tiny muted">'+monthLabel(c.month)+'</span>',
+      '<span class="num">'+money(sum(c.lines.map(l=>l.amount)))+'</span>',
+      c.status==="approved" ? "approved - awaiting payment" : "pending")).join("");
+  h += P.myBudgets.map(b=>item(
+      "showBudgetDetail('"+b.id+"')",
+      '<span class="code">Budget increase</span><span class="code strong">'+esc(job(b.job).code)+'</span>'+
+      '<span class="tiny muted">requested '+fmtDate(b.on)+'</span>',
+      '<span class="num">+'+hrs(b.to-b.from)+'h</span>', "pending")).join("");
+  return h + '</div>';
+}
+
 function renderPendingApprovals(){
     let h = "";
-    const sheets = pendingSheets();
+    const P = apPending();
+    const show = t => !apFiltersOn() || APF.type==="all" || APF.type===t;
 
+    h += renderMyPendingRequests(P);
+
+    if(!isApprover()){
+      return h + '<div class="card"><div class="empty">You can see your own requests here. Approvals are decided by '+
+        'your Assistant Manager or Manager, or by a Partner.</div></div>';
+    }
+
+    const sheets = P.sheets;
+    if(show("timesheet")){
     h += '<div class="card"><div class="card-head"><h2>Timesheets</h2><span class="spacer"></span>'+
-      '<span class="eyebrow">approve or query one job code at a time</span></div>';
+      '<span class="eyebrow">approve or query one day at a time</span></div>';
     if(!sheets.length){
       h += '<div class="empty">No timesheets waiting for your approval.</div>';
     } else {
-      h += sheets.map(({p, week})=>{
-        const gs=approvalGroupsFor(p.id, week);
-        const booked=sum(gs.map(g=>g.hours));
-        const drafts=entriesFor(p.id, week).filter(r=>r.status==="draft").length;
-        return '<div class="sheet"><div class="sheet-head">'+
-          '<span class="strong">'+esc(p.name)+'</span><span class="code">'+p.label+'</span>'+
-          '<span class="tag'+(week<WEEK?' warn':'')+'">Week '+fmtShort(week)+' – '+fmtShort(addDays(week,5))+(week<WEEK?' · earlier week':'')+'</span>'+
-          '<span class="spacer" style="flex:1"></span>'+
-          '<span class="num">'+hrs(booked)+'h</span>'+
-          '<span class="tiny muted">submitted</span>'+
-          '</div>'+
-          (drafts?'<p class="tiny muted" style="margin:6px 0 0">'+esc(p.name.split(" ")[0])+' also has '+drafts+' draft entr'+(drafts===1?'y':'ies')+
-            ' in this week that '+(drafts===1?'is':'are')+' not submitted yet - not shown here.</p>':'')+
-          '<div class="sheet-body">'+
-          gs.map(g=>{
-            const cls = g.status==="approved"?"approved":g.status==="queried"?"queried":"pending";
-            const done = g.status==="approved"||g.status==="queried";
-            return '<div class="line '+cls+'"><div class="line-top">'+
-              '<span class="code strong">'+esc(job(g.job).code)+'</span>'+
-              '<span class="tiny muted">'+esc(job(g.job).title)+'</span>'+
-              (job(g.job).overhead?'<span class="tag">non-chargeable</span>':"")+
-              '<span class="num strong" style="margin-left:auto">'+hrs(g.hours)+'h</span>'+
-              '<span class="line-acts">'+
-                (done
-                  ? '<span class="tag '+(g.status==="approved"?"ok":"bad")+'">'+g.status+'</span>'+
-                    '<button class="btn ghost sm" onclick="undoLine(\''+p.id+'\',\''+g.job+'\',\''+week+'\')">Undo</button>'
-                  : '<button class="btn sm" onclick="decideLine(\''+p.id+'\',\''+g.job+'\',true,\'\',\''+week+'\')">Approve</button>'+
-                    '<button class="btn ghost sm" onclick="queryLine(\''+p.id+'\',\''+g.job+'\',\''+week+'\')">Query</button>')+
-              '</span></div>'+
-              '<div class="line-days">'+g.rows.map(r=>
-                '<div class="line-day"><span class="d">'+weekdayDate(dateOf(r))+'</span>'+
-                '<span class="h">'+hrs(r.hours)+'h</span>'+taskTag(r)+'<span>'+esc(r.note)+'</span></div>').join("")+
-              '</div>'+
-              (g.query?'<p class="tiny" style="margin-top:7px;color:var(--red)">"'+esc(g.query)+'"</p>':"")+
-              (!job(g.job).overhead ? budgetHint(g.job) : "")+
-            '</div>';
-          }).join("")+
-          '</div></div>';
-      }).join("");
+      h += sheets.map(({p, week})=>approverWeekHTML(p, week)).join("");
     }
     h += '</div>';
+    }
 
     /* budget increases */
-    const bq = pendingBudgets();
+    const bq = P.budgets;
+    if(show("budget")){
     h += '<div class="card"><div class="card-head"><h2>Budget increases</h2></div>';
     h += bq.length ? bq.map(b=>
       '<div class="line pending"><div class="line-top">'+
@@ -3797,9 +3986,11 @@ function renderPendingApprovals(){
       budgetHint(b.job)+'</div>').join("")
       : '<div class="empty">'+(rank()>=MANAGER_RANK?"None waiting.":"Only assistant managers, managers and partners decide these.")+'</div>';
     h += '</div>';
+    }
 
     /* expense claims */
-    const cq = pendingClaims();
+    const cq = P.claims;
+    if(show("claim")){
     h += '<div class="card"><div class="card-head"><h2>Expense claims</h2></div>';
     h += cq.length ? cq.map(c=>{
       const tot=sum(c.lines.map(l=>l.amount)), rec=sum(c.lines.filter(l=>l.rec).map(l=>l.amount));
@@ -3820,11 +4011,13 @@ function renderPendingApprovals(){
           '</span></div>').join("")+'</div>'+
         '<p class="tiny muted" style="margin-top:6px">'+money(rec)+' recoverable from clients.</p></div>';
     }).join("") : '<div class="empty">'+
-      (CAN.payClaim()?"Nothing approved and awaiting payment.":rank()>=MANAGER_RANK?"None waiting.":"Only assistant managers, managers and partners approve claims.")+'</div>';
+      (CAN.payClaim()?"Nothing waiting for your approval or payment.":"None waiting.")+'</div>';
     h += '</div>';
+    }
 
     /* leave requests */
-    const lq = pendingLeaveRequests();
+    const lq = P.leaves;
+    if(show("leave")){
     h += '<div class="card"><div class="card-head"><h2>Leave requests</h2></div>';
     h += lq.length ? lq.map(r=>
       '<div class="line pending"><div class="line-top">'+
@@ -3835,11 +4028,13 @@ function renderPendingApprovals(){
         '<span class="line-acts">'+
           '<button class="btn sm" onclick="decideLeaveRequest(\''+r.requestId+'\',\''+r.who+'\',true)">Approve</button>'+
           '<button class="btn ghost sm" onclick="rejectLeavePrompt(\''+r.requestId+'\',\''+r.who+'\')">Reject</button>'+
+          '<button class="btn ghost sm" onclick="showLeaveDetail(\''+r.requestId+'\',\''+r.who+'\')">History</button>'+
         '</span></div>'+
         (r.reason?'<p class="tiny" style="margin-top:7px;max-width:64ch">"'+esc(r.reason)+'"</p>':"")+
       '</div>').join("")
       : '<div class="empty">No leave requests waiting.</div>';
     h += '</div>';
+    }
 
     return h;
 }
@@ -3857,76 +4052,42 @@ function budgetHint(jid){
 /* -------------------  APPROVALS: ACCEPTED / REJECTED HISTORY  ------------------- */
 function renderApprovalHistory(status){          // status: "approved" | "rejected"
   const accepted = status==="approved";
-  const word = accepted ? "accepted" : "rejected";
+  const word = accepted ? "approved" : "rejected";
+  const H = apHistory(accepted);
+  const show = t => !apFiltersOn() || APF.type==="all" || APF.type===t;
+  const byLine = (who, at) => who
+    ? '<p class="tiny muted" style="margin-top:6px">'+(accepted?"Approved":"Rejected")+' by '+
+      esc(person(who).name)+' <span class="code">'+esc(desigName(person(who)))+'</span>'+(at?", "+fmtDateTime(at):"")+'</p>'
+    : "";
   let h = "";
 
   /* timesheets */
-  const groups = decidedGroupsFor(accepted ? "approved" : "queried");
+  if(show("timesheet")){
   h += '<div class="card"><div class="card-head"><h2>Timesheets</h2><span class="spacer"></span>'+
     '<span class="eyebrow">'+word+'</span></div>';
-  h += groups.length ? groups.map(g=>
+  h += H.groups.length ? H.groups.map(g=>
       '<div class="line '+(accepted?"approved":"queried")+'" style="cursor:pointer" '+
-      'onclick="showTimesheetDecisionDetail(\''+g.person.id+'\',\''+g.job+'\',\''+g.week+'\')">'+
+      'onclick="showTimesheetDayDetail(\''+g.person.id+'\',\''+g.date+'\')">'+
       '<div class="line-top">'+
         '<span class="strong">'+esc(g.person.name)+'</span>'+
-        '<span class="code strong">'+esc(job(g.job).code)+'</span>'+
-        '<span class="tiny muted">wk of '+fmtDate(g.week)+'</span>'+
+        '<span class="code">'+esc(desigName(g.person))+'</span>'+
+        '<span class="strong">'+esc(weekdayDate(g.date))+'</span>'+
+        '<span class="tiny muted">'+g.jobs.map(j=>esc(job(j).code)).join(", ")+'</span>'+
         '<span class="num strong" style="margin-left:auto">'+hrs(g.hours)+'h</span>'+
-        '<span class="tag '+(accepted?"ok":"bad")+'">'+(accepted?"accepted":"rejected")+'</span>'+
+        '<span class="tag '+(accepted?"ok":"bad")+'">'+(accepted?word:"query raised")+'</span>'+
       '</div>'+
-      (g.decidedBy?'<p class="tiny muted" style="margin-top:6px">'+(accepted?"Approved":"Rejected")+' by '+
-        esc(person(g.decidedBy).name)+(g.decidedAt?", "+fmtDateTime(g.decidedAt):"")+'</p>':"")+
+      byLine(g.decidedBy, g.decidedAt)+
       (!accepted && g.query?'<p class="tiny" style="margin-top:4px;color:var(--red)">"'+esc(g.query)+'"</p>':"")+
       '</div>'
     ).join("")
-    : '<div class="empty">No '+word+' timesheets yet.</div>';
+    : '<div class="empty">No '+word+' timesheets.</div>';
   h += '</div>';
-
-  /* budget increases */
-  const budgets = decidedBudgets(accepted ? "approved" : "rejected");
-  h += '<div class="card"><div class="card-head"><h2>Budget increases</h2></div>';
-  h += rank()<MANAGER_RANK ? '<div class="empty">Only assistant managers, managers and partners can view this history.</div>'
-    : budgets.length ? budgets.map(b=>
-      '<div class="line '+(accepted?"approved":"queried")+'" style="cursor:pointer" onclick="showBudgetDetail(\''+b.id+'\')">'+
-      '<div class="line-top">'+
-        '<span class="code strong">'+esc(job(b.job).code)+'</span>'+
-        '<span class="num">+'+hrs(b.to-b.from)+'h additional</span>'+
-        '<span class="tiny muted">'+esc(person(b.by).name)+', requested '+fmtDate(b.on)+'</span>'+
-        '<span class="spacer" style="flex:1"></span>'+
-        '<span class="tag '+(accepted?"ok":"bad")+'">'+(accepted?"accepted":"rejected")+'</span>'+
-      '</div>'+
-      (b.decidedBy?'<p class="tiny muted" style="margin-top:6px">'+(accepted?"Approved":"Rejected")+' by '+
-        esc(person(b.decidedBy).name)+(b.decidedAt?", "+fmtDateTime(b.decidedAt):"")+'</p>':"")+
-      '</div>'
-    ).join("") : '<div class="empty">No '+word+' budget requests yet.</div>';
-  h += '</div>';
-
-  /* expense claims */
-  const claims = accepted ? acceptedClaims() : rejectedClaims();
-  h += '<div class="card"><div class="card-head"><h2>Expense claims</h2></div>';
-  h += (rank()<MANAGER_RANK && !(accepted && CAN.payClaim())) ? '<div class="empty">Only assistant managers, managers and partners can view this history.</div>'
-    : claims.length ? claims.map(c=>{
-      const tot=sum(c.lines.map(l=>l.amount));
-      const label = c.status==="paid" ? "paid" : accepted ? "accepted" : "rejected";
-      return '<div class="line '+(c.status==="rejected"?"queried":"approved")+'" style="cursor:pointer" onclick="showClaimDetail(\''+c.id+'\')">'+
-        '<div class="line-top">'+
-          '<span class="strong">'+esc(person(c.who).name)+'</span>'+
-          '<span class="tiny muted">'+monthLabel(c.month)+'</span>'+
-          '<span class="num strong" style="margin-left:auto">'+money(tot)+'</span>'+
-          '<span class="tag '+(c.status==="rejected"?"bad":"ok")+'">'+label+'</span>'+
-        '</div>'+
-        (c.approvedBy?'<p class="tiny muted" style="margin-top:6px">'+(c.status==="rejected"?"Rejected":"Approved")+' by '+
-          esc(person(c.approvedBy).name)+(c.approvedAt?", "+fmtDateTime(c.approvedAt):"")+'</p>':"")+
-        (c.status==="paid" && c.paidBy?'<p class="tiny muted" style="margin-top:2px">Paid by '+
-          esc(person(c.paidBy).name)+(c.paidAt?", "+fmtDateTime(c.paidAt):"")+'</p>':"")+
-        '</div>';
-    }).join("") : '<div class="empty">No '+word+' expense claims yet.</div>';
-  h += '</div>';
+  }
 
   /* leave requests */
-  const leaveReqs = decidedLeaveRequests(accepted ? "approved" : "rejected");
+  if(show("leave")){
   h += '<div class="card"><div class="card-head"><h2>Leave requests</h2></div>';
-  h += leaveReqs.length ? leaveReqs.map(r=>
+  h += H.leaves.length ? H.leaves.map(r=>
       '<div class="line '+(accepted?"approved":"queried")+'" style="cursor:pointer" '+
       'onclick="showLeaveDetail(\''+r.requestId+'\',\''+r.who+'\')">'+
       '<div class="line-top">'+
@@ -3935,74 +4096,320 @@ function renderApprovalHistory(status){          // status: "approved" | "reject
         '<span class="tiny muted">'+fmtDate(r.start)+(r.end!==r.start?' – '+fmtDate(r.end):'')+'</span>'+
         '<span class="num">'+fmtDays(r.days)+'</span>'+
         '<span class="spacer" style="flex:1"></span>'+
-        '<span class="tag '+(accepted?"ok":"bad")+'">'+(accepted?"accepted":"rejected")+'</span>'+
+        '<span class="tag '+(accepted?"ok":"bad")+'">'+word+'</span>'+
       '</div>'+
-      (r.approvedBy?'<p class="tiny muted" style="margin-top:6px">'+(accepted?"Approved":"Rejected")+' by '+
-        esc(person(r.approvedBy).name)+(r.approvedAt?", "+fmtDateTime(r.approvedAt):"")+'</p>':"")+
+      byLine(r.approvedBy, r.approvedAt)+
       (!accepted && r.rejectionReason?'<p class="tiny" style="margin-top:4px;color:var(--red)">"'+esc(r.rejectionReason)+'"</p>':"")+
       '</div>'
     ).join("")
-    : '<div class="empty">No '+word+' leave requests yet.</div>';
+    : '<div class="empty">No '+word+' leave requests.</div>';
   h += '</div>';
+  }
+
+  /* expense claims */
+  if(show("claim")){
+  h += '<div class="card"><div class="card-head"><h2>Expense claims</h2></div>';
+  h += H.claims.length ? H.claims.map(c=>{
+      const tot=sum(c.lines.map(l=>l.amount));
+      const label = c.status==="paid" ? "paid" : word;
+      return '<div class="line '+(c.status==="rejected"?"queried":"approved")+'" style="cursor:pointer" onclick="showClaimDetail(\''+c.id+'\')">'+
+        '<div class="line-top">'+
+          '<span class="strong">'+esc(person(c.who).name)+'</span>'+
+          '<span class="tiny muted">'+monthLabel(c.month)+'</span>'+
+          '<span class="num strong" style="margin-left:auto">'+money(tot)+'</span>'+
+          '<span class="tag '+(c.status==="rejected"?"bad":"ok")+'">'+label+'</span>'+
+        '</div>'+
+        byLine(c.approvedBy, c.approvedAt)+
+        (c.status==="paid" && c.paidBy?'<p class="tiny muted" style="margin-top:2px">Paid by '+
+          esc(person(c.paidBy).name)+(c.paidAt?", "+fmtDateTime(c.paidAt):"")+'</p>':"")+
+        '</div>';
+    }).join("") : '<div class="empty">No '+word+' expense claims.</div>';
+  h += '</div>';
+  }
+
+  /* budget increases */
+  if(show("budget")){
+  h += '<div class="card"><div class="card-head"><h2>Budget increases</h2></div>';
+  h += H.budgets.length ? H.budgets.map(b=>
+      '<div class="line '+(accepted?"approved":"queried")+'" style="cursor:pointer" onclick="showBudgetDetail(\''+b.id+'\')">'+
+      '<div class="line-top">'+
+        '<span class="code strong">'+esc(job(b.job).code)+'</span>'+
+        '<span class="num">+'+hrs(b.to-b.from)+'h additional</span>'+
+        '<span class="tiny muted">'+esc(person(b.by).name)+', requested '+fmtDate(b.on)+'</span>'+
+        '<span class="spacer" style="flex:1"></span>'+
+        '<span class="tag '+(accepted?"ok":"bad")+'">'+word+'</span>'+
+      '</div>'+
+      byLine(b.decidedBy, b.decidedAt)+
+      '</div>'
+    ).join("") : '<div class="empty">No '+word+' budget requests.</div>';
+  h += '</div>';
+  }
 
   return h;
 }
 
-function showTimesheetDecisionDetail(pid, jid, wk){
-  const rows = ENTRIES.filter(x=>x.who===pid && x.week===wk && x.job===jid);
-  if(!rows.length) return;
-  const st = rows[0].status, accepted = st==="approved";
-  const hours = sum(rows.map(r=>+r.hours||0));
-  modal('<h3>'+esc(job(jid).code)+' - '+esc(person(pid).name)+'</h3>'+
-    '<p class="tiny muted" style="margin-bottom:12px">Week of '+fmtDate(wk)+'</p>'+
+/* ---- Approval audit trail (approval_events, 056) ----
+   Every submit / approve / reject / undo / cancel / payment is one row that is
+   never changed, so the trail shows the full history even after a later
+   decision replaced the current status. */
+const AP_ACTION_LABEL = { submitted:"Submitted", self_certified:"Self-certified", approved:"Approved",
+  rejected:"Rejected", reopened:"Reopened (decision undone)", cancelled:"Cancelled", paid:"Marked paid" };
+const AP_ACTION_TAG = { approved:"ok", self_certified:"ok", paid:"ok", rejected:"bad", cancelled:"", submitted:"warn", reopened:"warn",
+  responded:"info", resolved:"ok" };
+/* Timesheets speak of queries, not rejections (057). */
+function apActionLabel(type, e){
+  if(type==="timesheet"){
+    if(e.action==="rejected") return "Query raised";
+    if(e.action==="submitted" && /queried/.test(e.from_status||"")) return "Resubmitted";
+    if(e.action==="responded") return "Employee replied";
+    if(e.action==="resolved") return "Query resolved by approver";
+  }
+  return AP_ACTION_LABEL[e.action]||e.action;
+}
+function approvalTrailHTML(type, key){
+  return '<div class="eyebrow" style="margin:16px 0 6px">Approval history</div>'+
+    '<div id="apTrail" data-key="'+esc(type+"|"+key)+'"><p class="tiny muted">Loading history…</p></div>';
+}
+async function loadApprovalTrail(type, key, alsoKeys){
+  const { data, error } = await supabase.from("approval_events")
+    .select("action,from_status,to_status,actor_id,actor_name,actor_designation,reason,occurred_at,detail")
+    .eq("organization_id", ORG_ID).eq("request_type", type).in("request_key", [key].concat(alsoKeys||[]))
+    .order("occurred_at", { ascending:true });
+  const el = document.getElementById("apTrail");
+  if(!el || el.dataset.key !== type+"|"+key) return;     // the window was closed or replaced
+  if(error){
+    el.innerHTML = '<p class="tiny muted">'+(/approval_events/.test(error.message||"")
+      ? 'The approval history will appear here once the database update (056) is installed.'
+      : 'Could not load the history - '+esc(error.message))+'</p>';
+    return;
+  }
+  if(!data || !data.length){ el.innerHTML = '<p class="tiny muted">No recorded actions yet.</p>'; return; }
+  el.innerHTML = '<table class="tiny"><thead><tr><th>When</th><th>Action</th><th>By</th><th>Note</th></tr></thead><tbody>'+
+    data.map(e=>{
+      const who = e.actor_id && person(e.actor_id).name!=="-" ? person(e.actor_id).name : (e.actor_name||"-");
+      return '<tr><td style="white-space:nowrap">'+fmtDateTime(e.occurred_at)+
+        (e.detail && e.detail.backfilled ? ' <span class="muted" title="Recorded from the existing data when the history was switched on">*</span>' : '')+'</td>'+
+        '<td><span class="tag '+(AP_ACTION_TAG[e.action]||"")+'">'+esc(apActionLabel(type, e))+'</span></td>'+
+        '<td>'+esc(who)+(e.actor_designation?' <span class="muted">· '+esc(e.actor_designation)+'</span>':'')+'</td>'+
+        '<td class="wrap">'+esc(e.reason||"")+'</td></tr>';
+    }).join("")+'</tbody></table>'+
+    (data.some(e=>e.detail && e.detail.backfilled)
+      ? '<p class="tiny muted" style="margin-top:6px">* Recorded from existing data when the history was switched on - earlier steps were not tracked.</p>' : '');
+}
+const apStatusTag = (st, label) => '<span class="tag '+({approved:"ok",paid:"ok",rejected:"bad",queried:"bad",pending:"warn",submitted:"warn"}[st]||"")+'">'+esc(label||st)+'</span>';
+const apPersonCell = id => esc(person(id).name)+' <span class="muted">· '+esc(desigName(person(id)))+'</span>';
+
+/* ---- Day-wise timesheet review (057) ---- */
+/* What changed between the entries as first submitted and as resubmitted. */
+function queryChangesHTML(q){
+  if(!q.resubmitted) return "";
+  const before = new Map((q.original||[]).map(e=>[e.id, e]));
+  const lines = [];
+  (q.resubmitted||[]).forEach(e=>{
+    const o = before.get(e.id);
+    const code = esc(job(e.job_id).code);
+    if(!o) lines.push('<li>Added '+code+': '+hrs(e.hours)+'h - '+esc(e.narration||"")+'</li>');
+    else {
+      if(+o.hours !== +e.hours) lines.push('<li>'+code+': hours '+hrs(o.hours)+'h → '+hrs(e.hours)+'h</li>');
+      if((o.narration||"") !== (e.narration||"")) lines.push('<li>'+code+': narration “'+esc(o.narration||"")+'” → “'+esc(e.narration||"")+'”</li>');
+    }
+  });
+  (q.original||[]).forEach(o=>{ if(!(q.resubmitted||[]).some(e=>e.id===o.id)) lines.push('<li>Removed '+esc(job(o.job_id).code)+': '+hrs(o.hours)+'h</li>'); });
+  return '<div class="tiny" style="margin-top:6px"><span class="muted">Changes on resubmission:</span>'+
+    (lines.length ? '<ul style="margin:4px 0 0 18px">'+lines.join("")+'</ul>' : ' <span class="muted">none - resubmitted with a reply only</span>')+'</div>';
+}
+/* The current query round of a date, as both sides see it. */
+function dayQueryBlockHTML(q){
+  if(!q) return "";
+  return '<div class="line queried" style="margin-top:8px"><div class="line-top">'+
+      '<span class="strong">Query · round '+q.round+'</span>'+
+      '<span class="tag '+(q.status==="resubmitted"?"warn":"bad")+'">'+
+        ({open:"Query raised", responded:"Employee replied", resubmitted:"Resubmitted"}[q.status]||q.status)+'</span>'+
+      '<span class="spacer" style="flex:1"></span>'+
+      '<span class="tiny muted">'+(q.raisedBy?esc(person(q.raisedBy).name)+' · '+esc(desigName(person(q.raisedBy)))+', ':'')+fmtDateTime(q.raisedAt)+'</span>'+
+    '</div>'+
+    '<p class="tiny" style="margin-top:6px;color:var(--red)">"'+esc(q.reason)+'"</p>'+
+    (q.response ? '<p class="tiny" style="margin-top:6px"><span class="muted">Reply from '+esc(person(q.who).name)+
+      (q.respondedAt?', '+fmtDateTime(q.respondedAt):'')+':</span> '+esc(q.response)+'</p>' : '')+
+    (q.resubmittedAt ? '<p class="tiny muted" style="margin-top:4px">Resubmitted '+fmtDateTime(q.resubmittedAt)+'</p>' : '')+
+    queryChangesHTML(q)+
+  '</div>';
+}
+function approverWeekHTML(p, week){
+  const dates = submittedDates(p.id, week);
+  const wst = weekApprovalStatus(p.id, week);
+  const booked = sum(dates.flatMap(d=>entriesOnDate(p.id, d).filter(r=>r.status!=="draft")).map(r=>+r.hours||0));
+  const drafts = entriesFor(p.id, week).filter(r=>r.status==="draft").length;
+  const clear = dates.filter(d=>{ const st=dayApprovalStatus(p.id,d); return (st==="pending"||st==="resubmitted") && !openDayQuery(p.id,d); });
+  return '<div class="sheet"><div class="sheet-head">'+
+      '<span class="strong">'+esc(p.name)+'</span><span class="code">'+esc(desigName(p))+'</span>'+
+      '<span class="tag'+(week<WEEK?' warn':'')+'">Week '+fmtShort(week)+' – '+fmtShort(addDays(week,5))+(week<WEEK?' · earlier week':'')+'</span>'+
+      weekStatusTag(wst)+
+      '<span class="spacer" style="flex:1"></span>'+
+      '<span class="num">'+hrs(booked)+'h</span><span class="tiny muted">submitted</span>'+
+      (clear.length>1 ? '<button class="btn ghost sm" onclick="approveClearDays(\''+p.id+'\',\''+week+'\')" '+
+        'title="Approves only days waiting for approval with no open query">Approve '+clear.length+' clear days</button>' : '')+
+    '</div>'+
+    (drafts?'<p class="tiny muted" style="margin:6px 0 0">'+esc(p.name.split(" ")[0])+' also has '+drafts+' draft entr'+(drafts===1?'y':'ies')+
+      ' in this week that '+(drafts===1?'is':'are')+' not submitted yet - not shown here.</p>':'')+
+    '<div class="sheet-body">'+dates.map(d=>approverDayHTML(p, d)).join("")+'</div></div>';
+}
+function approverDayHTML(p, date){
+  const rows = entriesOnDate(p.id, date).filter(r=>r.status!=="draft");
+  const st = dayApprovalStatus(p.id, date);
+  const q = liveDayQuery(p.id, date), open = openDayQuery(p.id, date);
+  const rounds = dayQueries(p.id, date).length;
+  const total = sum(rows.map(r=>+r.hours||0));
+  const decided = rows.find(r=>r.decidedBy && r.status==="approved");
+  const cls = st==="approved"?"approved":st==="queried"?"queried":"pending";
+  const btn = (label, fn, ghost) => '<button class="btn sm'+(ghost?' ghost':'')+'" onclick="'+fn+'">'+label+'</button>';
+  const args = '\''+p.id+'\',\''+date+'\'';
+  let acts = "";
+  if(st==="pending" || st==="resubmitted"){
+    acts = btn("Approve day", "decideDay("+args+",true)") + btn(st==="resubmitted"?"Query again":"Query", "queryDay("+args+")", true);
+  } else if(st==="queried"){
+    acts = (open ? '<span class="tiny muted">waiting for '+esc(p.name.split(" ")[0])+'</span>'+btn("Resolve & approve", "resolveDayPrompt("+args+")", true)
+                 : btn("Approve day", "decideDay("+args+",true)"))+
+           btn("Undo", "undoDay("+args+")", true);
+  } else if(st==="approved"){
+    acts = btn("Undo", "undoDay("+args+")", true);
+  }
+  acts += btn("History", "showTimesheetDayDetail("+args+")", true);
+  return '<details class="line '+cls+'"'+(st==="approved"?'':' open')+' style="margin-bottom:8px">'+
+    '<summary style="cursor:pointer;list-style:revert"><span class="strong">'+esc(weekdayDate(date))+'</span> '+
+      '<span class="num" style="margin:0 8px">'+hrs(total)+'h</span>'+dayStatusTag(st)+
+      (rounds?' <span class="tiny muted">· '+rounds+' quer'+(rounds===1?'y':'ies')+'</span>':'')+
+      (decided && st==="approved"?' <span class="tiny muted">· '+esc(person(decided.decidedBy).name)+'</span>':'')+
+    '</summary>'+
+    '<div class="line-days" style="margin-top:6px">'+rows.map(r=>
+      '<div class="line-day"><span class="code">'+esc(job(r.job).code)+'</span>'+
+      '<span class="h">'+hrs(r.hours)+'h</span>'+taskTag(r)+'<span>'+esc(r.note)+'</span></div>').join("")+
+    '</div>'+
+    (rows.some(r=>!job(r.job).overhead) ? [...new Set(rows.map(r=>r.job))].filter(j=>!job(j).overhead).map(budgetHint).join("") : "")+
+    dayQueryBlockHTML(q)+
+    '<div class="line-acts" style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">'+acts+'</div>'+
+  '</details>';
+}
+
+/* ---- Employee: queries on my timesheet (every week, not only the one open) ---- */
+function myQueriesHTML(){
+  const open = TS_QUERIES.filter(q=>q.who===me && (q.status==="open"||q.status==="responded"))
+    .sort((a,b)=>a.date<b.date?-1:1);
+  if(!open.length) return "";
+  return '<div class="card" style="border-color:var(--red)">'+
+    '<div class="card-head"><h2>Queries on your timesheet</h2><span class="spacer"></span>'+
+      '<span class="tag bad">'+open.length+' day'+(open.length===1?'':'s')+' need action</span></div>'+
+    open.map(q=>{
+      const rows = entriesOnDate(me, q.date).filter(r=>r.status!=="draft");
+      const earlier = dayQueries(me, q.date).filter(x=>x.round<q.round);
+      return '<div class="line queried" style="margin-bottom:10px"><div class="line-top">'+
+          '<span class="strong">'+esc(weekdayDate(q.date))+'</span>'+
+          '<span class="tag bad">'+(q.status==="responded"?"Replied - not resubmitted":"Query raised")+'</span>'+
+          (q.round>1?'<span class="tiny muted">round '+q.round+'</span>':'')+
+          '<span class="spacer" style="flex:1"></span>'+
+          '<span class="tiny muted">'+(q.raisedBy?esc(person(q.raisedBy).name)+' · '+esc(desigName(person(q.raisedBy)))+', ':'')+fmtDateTime(q.raisedAt)+'</span>'+
+        '</div>'+
+        '<p style="margin-top:8px;color:var(--red)">"'+esc(q.reason)+'"</p>'+
+        '<div class="eyebrow" style="margin:10px 0 4px">As you submitted it</div>'+
+        '<div class="line-days">'+(q.original||[]).map(e=>
+          '<div class="line-day"><span class="code">'+esc(job(e.job_id).code)+'</span><span class="h">'+hrs(e.hours)+'h</span>'+
+          '<span>'+esc(e.narration||"")+'</span></div>').join("")+'</div>'+
+        '<div class="eyebrow" style="margin:10px 0 4px">Now</div>'+
+        '<div class="line-days">'+rows.map(r=>
+          '<div class="line-day"><span class="code">'+esc(job(r.job).code)+'</span><span class="h">'+hrs(r.hours)+'h</span>'+
+          '<span>'+esc(r.note)+'</span>'+
+          (r.status==="queried"?'<button class="btn ghost sm" style="margin-left:auto" onclick="editQueriedEntry(\''+r.id+'\')">Edit</button>':'')+
+          '</div>').join("")+'</div>'+
+        (q.response
+          ? '<p class="tiny" style="margin-top:8px"><span class="muted">Your reply ('+fmtDateTime(q.respondedAt)+'):</span> '+esc(q.response)+'</p>'
+          : '<label class="field" style="margin-top:10px"><span>Reply to '+esc(q.raisedBy?person(q.raisedBy).name:"your approver")+' (optional)</span>'+
+            '<textarea id="qr_'+q.date+'" rows="2" placeholder="Split as asked - 4h annexure A, 2h annexure B."></textarea></label>')+
+        (earlier.length?'<p class="tiny muted" style="margin-top:6px">'+earlier.length+' earlier quer'+(earlier.length===1?'y':'ies')+
+          ' on this day - <button class="text-link" onclick="showTimesheetDayDetail(\''+me+'\',\''+q.date+'\')">see history</button></p>':'')+
+        '<div class="row" style="margin-top:10px;justify-content:flex-end;flex-wrap:wrap">'+
+          '<button class="btn ghost sm" onclick="openQueriedDay(\''+q.date+'\')">Open this day to add time</button>'+
+          (q.response?'':'<button class="btn ghost sm" onclick="replyToQuery(\''+q.date+'\')">Send reply</button>')+
+          '<button class="btn sm" onclick="resubmitDay(\''+q.date+'\')">Resubmit for approval</button>'+
+        '</div></div>';
+    }).join("")+
+    '<p class="tiny muted">Correct the entries with Edit (or add time to that day), reply if you want to explain, then '+
+      'Resubmit. Only that day goes back - the rest of the week is not affected.</p></div>';
+}
+
+/* ---- One day's full record: entries, every query round, and the audit trail ---- */
+function showTimesheetDayDetail(pid, date){
+  const rows = entriesOnDate(pid, date).filter(r=>r.status!=="draft");
+  if(!rows.length && !dayQueries(pid, date).length) return;
+  const st = dayApprovalStatus(pid, date);
+  const decided = rows.find(r=>r.decidedBy && r.status==="approved");
+  const week = mondayOfISO(date);
+  const rounds = dayQueries(pid, date);
+  const RES = { approved:"approved after resubmission", re_queried:"queried again", resolved_by_approver:"resolved by the approver", undone:"withdrawn (decision undone)" };
+  modal('<h3>'+esc(person(pid).name)+' · '+esc(weekdayDate(date))+'</h3>'+
+    '<p class="tiny muted" style="margin-bottom:12px">Timesheet day · week of '+fmtDate(week)+' · '+weekStatusTag(weekApprovalStatus(pid, week))+'</p>'+
     '<table><tbody>'+
-    '<tr><td class="tiny muted">Employee</td><td>'+esc(person(pid).name)+'</td></tr>'+
-    '<tr><td class="tiny muted">Job code</td><td class="wrap">'+esc(job(jid).code)+' - '+esc(job(jid).title)+'</td></tr>'+
-    '<tr><td class="tiny muted">Hours</td><td>'+hrs(hours)+'h</td></tr>'+
-    '<tr><td class="tiny muted">Status</td><td><span class="tag '+(accepted?"ok":"bad")+'">'+(accepted?"Accepted":"Rejected")+'</span></td></tr>'+
-    (rows[0].decidedBy?'<tr><td class="tiny muted">'+(accepted?"Approved":"Rejected")+' by</td><td>'+esc(person(rows[0].decidedBy).name)+'</td></tr>':'')+
-    (rows[0].decidedAt?'<tr><td class="tiny muted">'+(accepted?"Approved":"Rejected")+' at</td><td>'+fmtDateTime(rows[0].decidedAt)+'</td></tr>':'')+
-    (!accepted && rows[0].query?'<tr><td class="tiny muted">Reason</td><td>'+esc(rows[0].query)+'</td></tr>':'')+
+    '<tr><td class="tiny muted">Request ID</td><td class="tiny">TS-'+esc(date)+'</td></tr>'+
+    '<tr><td class="tiny muted">Employee</td><td>'+apPersonCell(pid)+'</td></tr>'+
+    '<tr><td class="tiny muted">Hours</td><td>'+hrs(sum(rows.map(r=>+r.hours||0)))+'h</td></tr>'+
+    '<tr><td class="tiny muted">Status</td><td>'+dayStatusTag(st)+'</td></tr>'+
+    (st==="pending"||st==="resubmitted" ? '<tr><td class="tiny muted">Decided by</td><td>'+esc(approverHint(pid))+'</td></tr>' : '')+
+    (decided?'<tr><td class="tiny muted">Approved by</td><td>'+apPersonCell(decided.decidedBy)+'</td></tr>'+
+      (decided.decidedAt?'<tr><td class="tiny muted">Approved at</td><td>'+fmtDateTime(decided.decidedAt)+'</td></tr>':''):'')+
     '</tbody></table>'+
+    '<div class="eyebrow" style="margin:14px 0 6px">Entries</div>'+
+    '<div class="line-days">'+rows.map(r=>'<div class="line-day"><span class="code">'+esc(job(r.job).code)+'</span>'+
+      '<span class="h">'+hrs(r.hours)+'h</span>'+taskTag(r)+'<span>'+esc(r.note)+'</span></div>').join("")+'</div>'+
+    (rounds.length ? '<div class="eyebrow" style="margin:14px 0 6px">Queries</div>'+
+      rounds.map(q=>dayQueryBlockHTML(q)+(q.status==="closed"?'<p class="tiny muted" style="margin:2px 0 8px">Round '+q.round+' closed - '+
+        esc(RES[q.resolution]||q.resolution||"")+(q.resolvedBy?' by '+esc(person(q.resolvedBy).name):'')+
+        (q.resolvedAt?', '+fmtDateTime(q.resolvedAt):'')+(q.resolutionNote?': “'+esc(q.resolutionNote)+'”':'')+'</p>':'')).join("") : '')+
+    approvalTrailHTML("timesheet", pid+":"+date)+
     '<div class="row" style="margin-top:14px"><button class="btn ghost" onclick="closeModal()">Close</button></div>');
+  // Day events (057) plus the per-job events recorded before day-wise approval (056).
+  const legacy = [...new Set(entriesOnDate(pid, date).map(r=>r.job))].map(j=>pid+":"+week+":"+j);
+  loadApprovalTrail("timesheet", pid+":"+date, legacy);
 }
 
 function showBudgetDetail(id){
   const b=BUDGET_REQUESTS.find(x=>x.id===id); if(!b) return;
-  const accepted = b.status==="approved";
+  const label = {approved:"Approved", rejected:"Rejected", pending:"Pending"}[b.status] || b.status;
   modal('<h3>Budget increase - '+esc(job(b.job).code)+'</h3>'+
     '<table><tbody>'+
     '<tr><td class="tiny muted">Job code</td><td class="wrap">'+esc(job(b.job).code)+' - '+esc(job(b.job).title)+'</td></tr>'+
     '<tr><td class="tiny muted">Responsible partner</td><td>'+(job(b.job).partner ? esc(partnerName(job(b.job).partner)) : '-')+'</td></tr>'+
-    '<tr><td class="tiny muted">Requested by</td><td>'+esc(person(b.by).name)+'</td></tr>'+
+    '<tr><td class="tiny muted">Requested by</td><td>'+apPersonCell(b.by)+'</td></tr>'+
     '<tr><td class="tiny muted">Requested on</td><td>'+fmtDate(b.on)+'</td></tr>'+
     '<tr><td class="tiny muted">Additional hours requested</td><td>+'+hrs(b.to-b.from)+'h</td></tr>'+
     '<tr><td class="tiny muted">Hours available</td><td>'+hrs(b.from)+'h → '+hrs(b.to)+'h</td></tr>'+
     '<tr><td class="tiny muted">Budgeted hours</td><td>'+hrs(job(b.job).budget)+'h (never changed by a request)</td></tr>'+
     '<tr><td class="tiny muted">Reason</td><td class="wrap">'+esc(b.reason)+'</td></tr>'+
-    '<tr><td class="tiny muted">Status</td><td><span class="tag '+(accepted?"ok":"bad")+'">'+(accepted?"Accepted":"Rejected")+'</span></td></tr>'+
-    (b.decidedBy?'<tr><td class="tiny muted">'+(accepted?"Approved":"Rejected")+' by</td><td>'+esc(person(b.decidedBy).name)+'</td></tr>':'')+
-    (b.decidedAt?'<tr><td class="tiny muted">'+(accepted?"Approved":"Rejected")+' at</td><td>'+fmtDateTime(b.decidedAt)+'</td></tr>':'')+
+    '<tr><td class="tiny muted">Status</td><td>'+apStatusTag(b.status, label)+'</td></tr>'+
+    (b.decidedBy?'<tr><td class="tiny muted">'+label+' by</td><td>'+apPersonCell(b.decidedBy)+'</td></tr>':'')+
+    (b.decidedAt?'<tr><td class="tiny muted">'+label+' at</td><td>'+fmtDateTime(b.decidedAt)+'</td></tr>':'')+
     '</tbody></table>'+
+    approvalTrailHTML("budget_increase", b.id)+
     '<div class="row" style="margin-top:14px"><button class="btn ghost" onclick="closeModal()">Close</button></div>');
+  loadApprovalTrail("budget_increase", b.id);
 }
 
 function showClaimDetail(id){
   const c=CLAIMS.find(x=>x.id===id); if(!c) return;
   const tot=sum(c.lines.map(l=>l.amount)), rejected=c.status==="rejected";
+  const label = {submitted:"Pending", approved:"Approved - awaiting payment", rejected:"Rejected", paid:"Paid", draft:"Draft"}[c.status] || c.status;
   modal('<h3>Expense claim - '+esc(person(c.who).name)+'</h3>'+
     '<table><tbody>'+
-    '<tr><td class="tiny muted">Employee</td><td>'+esc(person(c.who).name)+'</td></tr>'+
+    '<tr><td class="tiny muted">Employee</td><td>'+apPersonCell(c.who)+'</td></tr>'+
     '<tr><td class="tiny muted">Month</td><td>'+monthLabel(c.month)+'</td></tr>'+
     '<tr><td class="tiny muted">Amount</td><td>'+money(tot)+'</td></tr>'+
-    '<tr><td class="tiny muted">Status</td><td><span class="tag '+(rejected?"bad":"ok")+'">'+
-      (rejected?"Rejected":c.status==="paid"?"Paid":"Accepted")+'</span></td></tr>'+
-    (c.approvedBy?'<tr><td class="tiny muted">'+(rejected?"Rejected":"Approved")+' by</td><td>'+esc(person(c.approvedBy).name)+'</td></tr>':'')+
+    '<tr><td class="tiny muted">Status</td><td>'+apStatusTag(c.status==="submitted"?"pending":c.status, label)+'</td></tr>'+
+    (c.approvedBy?'<tr><td class="tiny muted">'+(rejected?"Rejected":"Approved")+' by</td><td>'+apPersonCell(c.approvedBy)+'</td></tr>':'')+
     (c.approvedAt?'<tr><td class="tiny muted">'+(rejected?"Rejected":"Approved")+' at</td><td>'+fmtDateTime(c.approvedAt)+'</td></tr>':'')+
-    (c.paidBy?'<tr><td class="tiny muted">Paid by</td><td>'+esc(person(c.paidBy).name)+'</td></tr>':'')+
+    (c.paidBy?'<tr><td class="tiny muted">Paid by</td><td>'+apPersonCell(c.paidBy)+'</td></tr>':'')+
     (c.paidAt?'<tr><td class="tiny muted">Paid at</td><td>'+fmtDateTime(c.paidAt)+'</td></tr>':'')+
     '</tbody></table>'+
+    approvalTrailHTML("expense_claim", c.id)+
     '<div class="row" style="margin-top:14px"><button class="btn ghost" onclick="closeModal()">Close</button></div>');
+  loadApprovalTrail("expense_claim", c.id);
 }
 
 /* -------------------------  FIRM TIME  --------------------------- */
@@ -4036,9 +4443,7 @@ VIEWS.firmtime = {
         return '<tr><td><span class="code">'+esc(j.code)+'</span><div class="tiny muted">'+esc(j.title)+'</div></td>'+
           '<td class="r num">'+hrs(t)+'h</td></tr>';
       }).join("")+'</tbody></table>'+
-      '<p class="tiny muted" style="margin-top:10px">These codes exist so nobody has to pad a client job to '+
-      'fill their week. Expect partners to book heavily to FIRM/BD - that is the right answer, and it is '+
-      'information you want.</p></div>';
+      '<p class="tiny muted" style="margin-top:10px"></p></div>';
 
     h += '<div class="card"><div class="card-head"><h2>This week, by person</h2></div><table><thead><tr>'+
       '<th>Person</th><th class="r">Booked</th><th class="r">Chargeable</th>'+
@@ -4386,7 +4791,40 @@ function setWorkFilter(field, val){
 function resetWorkFilters(){
   workFilterAssignedBy = "all"; workFilterAssignedTo = "all";
   workFilterDue = "all"; workFilterDueFrom = ""; workFilterDueTo = "";
+  workSearch = "";
   render();
+}
+
+/* ---- Search boxes (Work and Job codes) ----
+   The views are re-rendered in full on every keystroke, so the box gets its
+   focus and caret back afterwards. Matching is case-insensitive "contains". */
+let workSearch = "";
+let jobsSearch = "";
+const searchNorm = s => (s||"").toString().toLowerCase();
+const searchHit = (q, ...fields) => !q || fields.some(f => searchNorm(f).includes(q));
+function searchBoxHTML(id, value, placeholder, setter){
+  return '<label class="field" style="margin:0;flex:1 1 240px;min-width:200px"><span class="tiny muted">Search</span>'+
+    '<input type="search" id="'+id+'" value="'+esc(value)+'" placeholder="'+esc(placeholder)+'"'+
+    ' autocomplete="off" oninput="'+setter+'(this)"></label>';
+}
+function refocusSearch(id, pos){
+  const el = document.getElementById(id);
+  if(!el) return;
+  el.focus();
+  try{ el.setSelectionRange(pos, pos); }catch(e){}
+}
+function setWorkSearch(el){
+  const pos = el.selectionStart;
+  workSearch = el.value; render(); refocusSearch("workSearch", pos);
+}
+function setJobsSearch(el){
+  const pos = el.selectionStart;
+  jobsSearch = el.value; render(); refocusSearch("jobsSearch", pos);
+}
+/* Job code, title, client, period and responsible partner. */
+function jobMatchesSearch(j, q){
+  return searchHit(q, j.code, j.title, clientOf(j.client).name, j.period,
+    j.partner ? partnerName(j.partner) : "");
 }
 
 /* Does a task's due date match the Due date filter? Dates are the app's local
@@ -4447,6 +4885,7 @@ VIEWS.work = {
       (CAN.createJob()?'<button class="btn ghost sm" onclick="newJob()">New job code</button>':'')+
       '</div>'+
       '<div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;margin-top:8px;padding-top:10px;border-top:1px solid var(--rule-2)">'+
+        searchBoxHTML("workSearch", workSearch, "Job code, client, task or person", "setWorkSearch")+
         '<label class="field" style="margin:0;min-width:170px"><span class="tiny muted">Assigned by</span>'+
           '<select id="workFilterBy" onchange="setWorkFilter(\'by\',this.value)">'+
             '<option value="all"'+(workFilterAssignedBy==="all"?" selected":"")+'>All</option>'+
@@ -4467,12 +4906,13 @@ VIEWS.work = {
             '<input type="date" id="workFilterDueFrom" value="'+esc(workFilterDueFrom)+'" onchange="setWorkFilter(\'dueFrom\',this.value)"></label>'+
           '<label class="field" style="margin:0;min-width:140px"><span class="tiny muted">Due to</span>'+
             '<input type="date" id="workFilterDueTo" value="'+esc(workFilterDueTo)+'" onchange="setWorkFilter(\'dueTo\',this.value)"></label>' : '')+
-        ((workFilterAssignedBy!=="all" || workFilterAssignedTo!=="all" || workFilterDue!=="all") ?
+        ((workFilterAssignedBy!=="all" || workFilterAssignedTo!=="all" || workFilterDue!=="all" || workSearch.trim()) ?
           '<button class="btn ghost sm" style="margin-bottom:2px" onclick="resetWorkFilters()">Reset filters</button>' : '')+
       '</div>'+
       '<p class="tiny muted" style="margin-top:10px">Filter tasks by assigner, assignee or due date - the filters combine. '+
       'For a single day, set the same from and to date. </p></div>';
 
+    const wq = searchNorm(workSearch.trim());
     const byJob = {};
     TASKS.forEach(t=>{
       const matchesTo = (workFilterAssignedTo === "all" || t.who === workFilterAssignedTo);
@@ -4481,18 +4921,26 @@ VIEWS.work = {
         ? partnerAssignments.length > 0
         : partnerAssignments.some(a=>a.partnerId===workFilterAssignedBy);
 
-      if (matchesTo && matchesBy && matchesDueFilter(t)) {
+      // Search: a matching job shows all its tasks; otherwise only the tasks
+      // whose title or assignee matches.
+      const matchesSearch = !wq || jobMatchesSearch(job(t.job), wq) ||
+        searchHit(wq, t.title, person(t.who).name, STATUS_LABEL[t.status]);
+
+      if (matchesTo && matchesBy && matchesDueFilter(t) && matchesSearch) {
         (byJob[t.job] = byJob[t.job] || []).push(t);
       }
     });
 
-    const isFiltered = (workFilterAssignedBy !== "all" || workFilterAssignedTo !== "all" || workFilterDue !== "all");
+    const isFiltered = (workFilterAssignedBy !== "all" || workFilterAssignedTo !== "all" || workFilterDue !== "all" || !!wq);
     let jids = JOBS.filter(j => !j.overhead && j.status !== "closed").map(j => j.id);
+    // A job that matches the search stays listed even when it has no tasks yet,
+    // as long as no other filter is narrowing the list.
+    const onlySearch = wq && workFilterAssignedBy === "all" && workFilterAssignedTo === "all" && workFilterDue === "all";
     // Closed jobs with tasks stay viewable, in their own section, for reference.
     let closedIds = JOBS.filter(j => j.status === "closed" && byJob[j.id] && byJob[j.id].length).map(j => j.id);
 
     if (isFiltered) {
-      jids = jids.filter(jid => byJob[jid] && byJob[jid].length > 0);
+      jids = jids.filter(jid => (byJob[jid] && byJob[jid].length > 0) || (onlySearch && jobMatchesSearch(job(jid), wq)));
     }
 
     if (!jids.length && !closedIds.length) {
@@ -4591,10 +5039,17 @@ VIEWS.jobs = {
       (CAN.createJob()
         ? '<button class="btn" onclick="newJob()">New job code</button>'
         : '<span class="tiny muted">Assistant Manager and above can raise a job code.</span>')+
-      '</div>'+jobsPartnerFilterHTML()+'</div>';
-    const active = JOBS.filter(j=>!j.overhead && j.status!=="closed" && jobMatchesPartnerFilter(j));
-    const closedJobs = JOBS.filter(j=>!j.overhead && j.status==="closed" && jobMatchesPartnerFilter(j))
+      '</div>'+
+      '<div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap">'+
+        searchBoxHTML("jobsSearch", jobsSearch, "Job code, title, client, period or partner", "setJobsSearch")+
+        jobsPartnerFilterHTML()+
+        (jobsSearch.trim() ? '<button class="btn ghost sm" style="margin-bottom:2px" onclick="jobsSearch=\'\';render()">Clear search</button>' : '')+
+      '</div></div>';
+    const jq = searchNorm(jobsSearch.trim());
+    const active = JOBS.filter(j=>!j.overhead && j.status!=="closed" && jobMatchesPartnerFilter(j) && jobMatchesSearch(j, jq));
+    const closedJobs = JOBS.filter(j=>!j.overhead && j.status==="closed" && jobMatchesPartnerFilter(j) && jobMatchesSearch(j, jq))
       .sort((a,b)=>(b.closedAt||"").localeCompare(a.closedAt||""));
+    const noneMsg = jq ? 'No job codes match “'+esc(jobsSearch.trim())+'”.' : null;
     if(jobsFilter==="over"){
       // Same rule and same list as the Today "Jobs over budget" count.
       const over = active.filter(isJobOverBudget);
@@ -4606,14 +5061,14 @@ VIEWS.jobs = {
           '<p class="tiny muted" style="margin-top:6px">Booked hours are above budgeted hours plus approved additional hours. '+
           'Closed jobs are not included.</p></div>'+
         (over.length ? over.map(jobCardHTML).join("")
-          : '<div class="card"><div class="empty">No job codes are over budget right now.</div></div>');
+          : '<div class="card"><div class="empty">'+(noneMsg||'No job codes are over budget right now.')+'</div></div>');
     }
     return head +
-      (active.length ? active.map(jobCardHTML).join("") : '<div class="card"><div class="empty">No active job codes.</div></div>') +
+      (active.length ? active.map(jobCardHTML).join("") : '<div class="card"><div class="empty">'+(noneMsg||'No active job codes.')+'</div></div>') +
       '<div class="card-head" style="margin:22px 0 10px"><h2>Job closed</h2><span class="spacer"></span>'+
         '<span class="eyebrow">'+closedJobs.length+' job'+(closedJobs.length===1?"":"s")+' · kept for reference</span></div>'+
       (closedJobs.length ? closedJobs.map(jobCardHTML).join("")
-        : '<div class="card"><div class="empty">No closed jobs yet.</div></div>');
+        : '<div class="card"><div class="empty">'+(noneMsg ? 'No closed jobs match.' : 'No closed jobs yet.')+'</div></div>');
   }
 };
 /* Job card: the job's Responsible Partner, with the client's Relationship
@@ -4740,8 +5195,7 @@ VIEWS.expenses = {
           'onclick="submitClaim(\''+mine.id+'\')">Submit claim</button> '+
           '<span class="tiny muted">'+(person(me).reportsTo?"Goes to "+esc(person(person(me).reportsTo).name)+" for approval.":"Submitted for approval.")+'</span></div>'
         : '<p class="tiny muted" style="margin-top:10px">This month\'s claim has already been '+mine.status+'.</p>')+
-      '<p class="tiny muted" style="margin-top:10px">Recoverable expenses stay on the job code so they can go '+
-      'onto the client\'s bill. Both kinds are reimbursed to whoever paid.</p></div>';
+      '<p class="tiny muted" style="margin-top:10px"></p></div>';
 
     if(past.length) h+='<div class="card"><div class="card-head"><h2>Earlier claims</h2></div><table><tbody>'+
       past.map(c=>'<tr><td>'+c.month+'</td><td class="r num">'+money(sum(c.lines.map(l=>l.amount)))+'</td>'+
@@ -5108,7 +5562,7 @@ async function deleteStatCategory(id){
 }
 
 /* =========================  ACTIONS  ============================= */
-function go(v){ closeMobileMenu(true); if(v==="salary"&&!CAN.viewSalary())return; jobsFilter="all"; jobsPartnerFilter="all"; if(v==="leave") LEAVE_OPEN_CARDS=new Set(LEAVE_DEFAULT_OPEN); view=v; window.scrollTo(0,0); if(v==="salary")loadSalaryMonth(); else render(); if(v==="attendance"||v==="today") refreshAttendanceOverrides(); }
+function go(v){ closeMobileMenu(true); if(v==="salary"&&!CAN.viewSalary())return; jobsFilter="all"; jobsPartnerFilter="all"; jobsSearch=""; if(v==="leave") LEAVE_OPEN_CARDS=new Set(LEAVE_DEFAULT_OPEN); if(v==="approvals") APPROVALS_OPEN_CARDS=new Set(APPROVALS_DEFAULT_OPEN); view=v; window.scrollTo(0,0); if(v==="salary")loadSalaryMonth(); else render(); if(v==="attendance"||v==="today") refreshAttendanceOverrides(); }
 /* Overrides a partner made since login show up when the employee opens
    Attendance / Today or changes the month (RLS: own rows, or visible people). */
 let _ovRefreshing = false;
@@ -5123,6 +5577,7 @@ async function quickAdd(){
   const jid=$("#qJob").value, date=$("#qDate").value, h=+$("#qHrs").value, note=$("#qNote").value.trim();
   const taskId=($("#qTask")&&$("#qTask").value)||null;
   if(!validISODate(date)) return toast("Choose a valid date");
+  if(!jid || !canLogTimeTo(job(jid))) return toast("Choose a job code you are assigned to");
   if(taskId && !TASKS.some(t=>t.id===taskId && t.job===jid)) return toast("That task does not belong to the selected job code");
   const week=mondayOfISO(date), day=weekdayIndex(date);
   if(dateSubmitted(me,date)) return toast(fmtShort(date)+" is already submitted - choose a date that is not submitted yet");
@@ -5212,10 +5667,13 @@ async function reloadLinkedTasks(rows){
   data.forEach(d=>{ const t=TASKS.find(x=>x.id===d.id); if(t) t.status=d.status; });
 }
 
-/* per job code, not per week */
-async function decideLine(who, jid, ok, note, week=WEEK){
-  const rows = ENTRIES.filter(x=>x.who===who && x.week===week && x.job===jid && x.status==="pending");
+/* Per DATE, not per week or job code (057). The database decides who may
+   (guard_timesheet_entry -> approval_can_decide) and refuses to approve a
+   date whose query is still open. */
+async function decideDay(who, date, ok, note){
+  const rows = entriesOnDate(who, date).filter(x=>x.status==="pending");
   if(!rows.length) return render();
+  if(ok && openDayQuery(who, date)) return toast("This day has an open query - wait for the resubmission, or resolve the query");
   const nextStatus = ok?"approved":"queried", nextQuery = ok?"":(note||"");
   const decidedAt = new Date().toISOString();
   const { error } = await supabase.from("timesheet_entries")
@@ -5223,32 +5681,133 @@ async function decideLine(who, jid, ok, note, week=WEEK){
   if(error) return toast("Could not save - "+error.message);
   rows.forEach(x=>{ x.status = nextStatus; x.query = nextQuery; x.decidedBy = me; x.decidedAt = decidedAt; });
   if(ok) await reloadLinkedTasks(rows);
-  toast((ok?"Approved ":"Queried ")+job(jid).code+" - "+person(who).name.split(" ")[0]);
+  await loadDayQueries();
+  toast((ok?"Approved ":"Query raised on ")+fmtShort(date)+" - "+person(who).name.split(" ")[0]);
   render();
 }
-function queryLine(who, jid, week=WEEK){
-  modal('<h3>Query '+esc(job(jid).code)+'</h3>'+
-    '<p class="tiny muted" style="margin-bottom:12px">Only this job code goes back. Anything you have already '+
-    'approved on '+esc(person(who).name)+'\'s week stays approved.</p>'+
-    '<label class="field"><span>What needs changing</span>'+
+function queryDay(who, date){
+  const q = liveDayQuery(who, date);
+  modal('<h3>Raise a query · '+esc(weekdayDate(date))+'</h3>'+
+    '<p class="tiny muted" style="margin-bottom:12px">Only '+esc(fmtDate(date))+' goes back to '+esc(person(who).name)+
+    '. The other days of the week keep their own status.</p>'+
+    (q && q.status==="resubmitted" ? '<p class="tiny" style="margin-bottom:10px">This day was resubmitted after query round '+q.round+
+      ' - raising another query starts round '+(q.round+1)+'.</p>' : '')+
+    '<label class="field"><span>Query</span>'+
     '<textarea id="qlNote" rows="3" placeholder="6h on clause 44 looks high against the 2h estimate - please split by annexure."></textarea></label>'+
     '<div class="row"><button class="btn ghost" onclick="closeModal()">Cancel</button>'+
-    '<button class="btn danger" onclick="doQuery(\''+who+'\',\''+jid+'\',\''+week+'\')">Send back</button></div>');
+    '<button class="btn danger" onclick="doQueryDay(\''+who+'\',\''+date+'\')">Raise query</button></div>');
 }
-function doQuery(who,jid,week=WEEK){
+function doQueryDay(who, date){
   const n=$("#qlNote").value.trim();
-  if(n.length<10) return toast("Give a reason of at least 10 characters");
-  closeModal(); decideLine(who,jid,false,n,week);
+  if(n.length<10) return toast("Give a query of at least 10 characters");
+  closeModal(); decideDay(who, date, false, n);
 }
-async function undoLine(who,jid,week=WEEK){
-  const rows = ENTRIES.filter(x=>x.who===who && x.week===week && x.job===jid && x.status!=="draft");
+/* Undo a decision on one date - back to pending. */
+async function undoDay(who, date){
+  const rows = entriesOnDate(who, date).filter(x=>x.status==="approved"||x.status==="queried");
   if(!rows.length) return render();
   const { error } = await supabase.from("timesheet_entries")
     .update({ status:"pending", query_reason:"", decided_by:null, decided_at:null }).in("id", rows.map(r=>r.id));
   if(error) return toast("Could not undo - "+error.message);
   rows.forEach(x=>{ x.status="pending"; x.query=""; x.decidedBy=null; x.decidedAt=null; });
   await reloadLinkedTasks(rows);
+  await loadDayQueries();
   render();
+}
+/* Approve every date of the week that is pending with no open query. A
+   queried date is never touched. */
+async function approveClearDays(who, week){
+  const dates = submittedDates(who, week).filter(d=>dayApprovalStatus(who, d)!=="queried" && !openDayQuery(who, d) &&
+    entriesOnDate(who, d).some(r=>r.status==="pending"));
+  const rows = dates.flatMap(d=>entriesOnDate(who, d).filter(r=>r.status==="pending"));
+  if(!rows.length) return toast("No days without open queries are waiting");
+  const decidedAt = new Date().toISOString();
+  const { error } = await supabase.from("timesheet_entries")
+    .update({ status:"approved", query_reason:"", decided_by:me, decided_at:decidedAt }).in("id", rows.map(r=>r.id));
+  if(error) return toast("Could not save - "+error.message);
+  rows.forEach(x=>{ x.status="approved"; x.query=""; x.decidedBy=me; x.decidedAt=decidedAt; });
+  await reloadLinkedTasks(rows);
+  await loadDayQueries();
+  toast("Approved "+dates.length+" day"+(dates.length===1?"":"s")+" - "+person(who).name.split(" ")[0]);
+  render();
+}
+/* An approver closes an open query themselves and approves the date. */
+function resolveDayPrompt(who, date){
+  modal('<h3>Resolve query and approve · '+esc(weekdayDate(date))+'</h3>'+
+    '<p class="tiny muted" style="margin-bottom:12px">Use this when the query no longer needs a resubmission from '+
+    esc(person(who).name)+'. The query and this note stay in the history.</p>'+
+    '<label class="field"><span>How it was resolved</span>'+
+    '<textarea id="rsNote" rows="2" placeholder="Discussed by phone - hours are correct."></textarea></label>'+
+    '<div class="row"><button class="btn ghost" onclick="closeModal()">Cancel</button>'+
+    '<button class="btn" onclick="doResolveDay(\''+who+'\',\''+date+'\')">Resolve and approve</button></div>');
+}
+async function doResolveDay(who, date){
+  const n=$("#rsNote").value.trim();
+  if(n.length<3) return toast("Say how the query was resolved");
+  closeModal();
+  const { error } = await supabase.rpc("timesheet_resolve_and_approve_day", { p_profile:who, p_date:date, p_note:n });
+  if(error) return toast(/function|schema cache/i.test(error.message||"") ? "Needs the latest database update (057)" : "Could not save - "+error.message);
+  const decidedAt = new Date().toISOString();
+  const rows = entriesOnDate(who, date).filter(x=>x.status==="pending"||x.status==="queried");
+  rows.forEach(x=>{ x.status="approved"; x.decidedBy=me; x.decidedAt=decidedAt; });
+  await reloadLinkedTasks(rows);
+  await loadDayQueries();
+  toast("Query resolved and "+fmtShort(date)+" approved");
+  render();
+}
+
+/* ---- employee side: reply, correct, resubmit a queried date ---- */
+async function replyToQuery(date){
+  const el=document.getElementById("qr_"+date);
+  const text=(el && el.value || "").trim();
+  if(text.length<3) return toast("Write a reply first");
+  const { error } = await supabase.rpc("timesheet_query_respond", { p_date:date, p_response:text });
+  if(error) return toast(/function|schema cache/i.test(error.message||"") ? "Needs the latest database update (057)" : "Could not send - "+error.message);
+  await loadDayQueries();
+  toast("Reply saved - resubmit the day to send it back to your approver");
+  render();
+}
+async function resubmitDay(date){
+  const el=document.getElementById("qr_"+date);
+  const text=(el && el.value || "").trim();
+  const q=openDayQuery(me, date);
+  // A reply typed but not sent yet goes with the resubmission.
+  if(text && q && !q.response){
+    const { error } = await supabase.rpc("timesheet_query_respond", { p_date:date, p_response:text });
+    if(error) return toast("Could not send the reply - "+error.message);
+  }
+  TIMESHEET_WEEK=mondayOfISO(date);
+  await submitSheet(date);
+  await loadDayQueries();
+  render();
+}
+function openQueriedDay(date){
+  TIMESHEET_DATE=date; TIMESHEET_WEEK=mondayOfISO(date);
+  if(view!=="mytime") go("mytime"); else render();
+}
+/* Correct a queried entry (hours / narration). Drafts are removed and re-added as before. */
+function editQueriedEntry(id){
+  const r=ENTRIES.find(x=>x.id===id);
+  if(!r || r.who!==me || r.status!=="queried") return;
+  modal('<h3>Correct entry · '+esc(weekdayDate(dateOf(r)))+'</h3>'+
+    '<p class="tiny muted" style="margin-bottom:12px">'+esc(job(r.job).code)+' - '+esc(job(r.job).title)+
+    '. The version you submitted is kept in the query history.</p>'+
+    '<div class="grid g2" style="gap:10px">'+
+    '<label class="field"><span>Hours</span><input type="number" id="eqHrs" step="0.25" min="0.25" value="'+hrs(r.hours)+'"></label></div>'+
+    '<label class="field"><span>What you did</span><input type="text" id="eqNote" value="'+esc(r.note)+'"></label>'+
+    '<div class="row"><button class="btn ghost" onclick="closeModal()">Cancel</button>'+
+    '<button class="btn" onclick="saveQueriedEntry(\''+id+'\')">Save correction</button></div>');
+}
+async function saveQueriedEntry(id){
+  const r=ENTRIES.find(x=>x.id===id); if(!r) return closeModal();
+  const h=+$("#eqHrs").value, note=$("#eqNote").value.trim();
+  if(!(h>0)) return toast("Enter the hours");
+  if(!note) return toast("Say what you did - the approver reads this");
+  const { error } = await supabase.from("timesheet_entries").update({ hours:h, narration:note }).eq("id", id);
+  if(error && /request additional hours/i.test(error.message||"")) return budgetBlocked(r.job, h, error.message);
+  if(error) return toast("Could not save - "+error.message);
+  r.hours=h; r.note=note;
+  closeModal(); toast("Correction saved - resubmit the day when you are done"); render();
 }
 
 /* --- budget --- */
@@ -5793,17 +6352,19 @@ function showLeaveDetail(requestId, who){
   const canDecide = r.status==="pending" && CAN.approveLeave(who, r);
   modal('<h3>'+esc(leaveTypeLabel(r.type))+' - '+esc(person(who).name)+'</h3>'+
     '<table><tbody>'+
-    '<tr><td class="tiny muted">Employee</td><td>'+esc(person(who).name)+'</td></tr>'+
+    '<tr><td class="tiny muted">Employee</td><td>'+apPersonCell(who)+'</td></tr>'+
     '<tr><td class="tiny muted">Type</td><td>'+esc(leaveTypeLabel(r.type))+'</td></tr>'+
     '<tr><td class="tiny muted">Dates</td><td>'+fmtDate(r.start)+(r.end!==r.start?' – '+fmtDate(r.end):'')+'</td></tr>'+
     '<tr><td class="tiny muted">Days</td><td>'+fmtDays(r.days)+'</td></tr>'+
     '<tr><td class="tiny muted">Reason</td><td class="wrap">'+esc(r.reason||"-")+'</td></tr>'+
     '<tr><td class="tiny muted">Applied</td><td>'+(r.createdAt?fmtDateTime(r.createdAt):"-")+'</td></tr>'+
     '<tr><td class="tiny muted">Status</td><td><span class="tag '+STATUS_TAG_LEAVE[r.status]+'">'+r.status+'</span></td></tr>'+
-    (r.approvedBy?'<tr><td class="tiny muted">'+(rejected?"Rejected":"Approved")+' by</td><td>'+esc(person(r.approvedBy).name)+'</td></tr>':'')+
+    (r.status==="pending"?'<tr><td class="tiny muted">Decided by</td><td>'+esc(approverHint(who))+'</td></tr>':'')+
+    (r.approvedBy?'<tr><td class="tiny muted">'+(rejected?"Rejected":"Approved")+' by</td><td>'+apPersonCell(r.approvedBy)+'</td></tr>':'')+
     (r.approvedAt?'<tr><td class="tiny muted">'+(rejected?"Rejected":"Approved")+' at</td><td>'+fmtDateTime(r.approvedAt)+'</td></tr>':'')+
     (rejected && r.rejectionReason?'<tr><td class="tiny muted">Rejection reason</td><td class="wrap">'+esc(r.rejectionReason)+'</td></tr>':'')+
     '</tbody></table>'+
+    approvalTrailHTML("leave", requestId)+
     (r.status==="pending" && who===me
       ? '<div class="row" style="margin-top:14px"><button class="btn ghost" onclick="closeModal()">Close</button>'+
         '<button class="btn danger" onclick="closeModal();cancelLeaveRequest(\''+requestId+'\')">Cancel request</button></div>'
@@ -5813,6 +6374,7 @@ function showLeaveDetail(requestId, who){
             '<button class="btn danger" onclick="closeModal();rejectLeavePrompt(\''+requestId+'\',\''+who+'\')">Reject</button></div>'
           : '<div class="row" style="margin-top:14px"><button class="btn ghost" onclick="closeModal()">Close</button></div>'
         )));
+  loadApprovalTrail("leave", requestId);
 }
 
 /* Partner-only. A new type belongs to the organization (leave_types has no
@@ -6521,7 +7083,9 @@ function suggestCode(){
   const pd = $("#njPeriod").value || currentFY();
   // A repeating job keeps one code for every date, so the period is not part of it.
   const series = njRepeats();
-  const code = (cl?cl.code:"CLIENT")+"/"+sv+(series ? "" : "/"+pd);
+  // The full client name by default (the field stays editable); the client's
+  // short code is unchanged in the database.
+  const code = (cl ? (cl.name||cl.code) : "CLIENT")+"/"+sv+(series ? "" : "/"+pd);
   $("#njCode").value = code;
   if(!$("#njTitle").dataset.touched) $("#njTitle").value = ((sv ? serviceName(sv) : "")+(series ? "" : " "+pd)).trim();
 }
@@ -6616,8 +7180,8 @@ function newJob(jid){
    date keeps the same number of days from it. The database raises the job for
    the next date once the previous job is closed or its due date has passed. */
 const REPEAT_CHOICES = [
-  ["none","Does not repeat"], ["daily:1","Daily"], ["weekly:1","Weekly"], ["monthly:1","Monthly"],
-  ["monthly:3","Every 3 months"], ["monthly:6","Every 6 months"], ["yearly:1","Yearly"]
+  ["none","Does not repeat"], ["monthly:1","Monthly"],
+  ["monthly:3","Quarterly"], ["monthly:6","Half-yearly"], ["yearly:1","Yearly"]
 ];
 function njRepeatHTML(j){
   const s = j && j.scheduleId ? SCHEDULES[j.scheduleId] : null;
@@ -6830,10 +7394,14 @@ function newTask(jid){
     '<p class="tiny muted" style="margin-bottom:12px">'+esc(j.code)+' - '+esc(j.title)+'</p>'+
     '<label class="field"><span>What needs doing</span>'+
       '<input type="text" id="ntTitle" placeholder="Bank reconciliation for the year"></label>'+
-    '<div class="grid g3" style="gap:10px">'+
-    '<label class="field"><span>Assign to</span><select id="ntWho">'+
-      staff().filter(p=>p.role!=="accounts").map(p=>'<option value="'+p.id+'"'+
-        (p.id===me?" selected":"")+'>'+esc(p.name)+'</option>').join("")+'</select></label>'+
+    '<label class="field" style="margin-bottom:4px"><span>Assign to</span></label>'+
+    '<input type="text" placeholder="Search people" oninput="ntFilter(this.value)" style="margin-bottom:6px">'+
+    '<div class="ovr-people" id="ntPeople">'+
+      staff().filter(p=>p.role!=="accounts").map(p=>
+        '<label data-name="'+esc(p.name.toLowerCase())+'"><input type="checkbox" name="ntWho" value="'+p.id+'"'+
+        (p.id===me?" checked":"")+' onchange="ntCount()"> '+esc(p.name)+'</label>').join("")+'</div>'+
+    '<p class="tiny muted" id="ntCount" style="margin:-6px 0 11px">1 selected - each person gets their own copy of the task</p>'+
+    '<div class="grid g2" style="gap:10px">'+
     '<label class="field"><span>Due</span><input type="date" id="ntDue" value="'+(j.due||TODAY)+'"></label>'+
     '<label class="field"><span>Est. hours</span>'+
       '<input type="number" id="ntEst" min="0.25" step="0.25" value="2"></label></div>'+
@@ -6845,24 +7413,29 @@ function newTask(jid){
     '<button class="btn" id="ntSave" onclick="saveTask(\''+jid+'\')">Add task</button></div>');
 }
 
+function ntPicked(){
+  return [...document.querySelectorAll('#ntPeople input[name="ntWho"]:checked')].map(c=>c.value);
+}
+function ntCount(){
+  const n=ntPicked().length, el=$("#ntCount");
+  if(el) el.textContent = n+" selected"+(n>1?" - each person gets their own copy of the task":"");
+}
+function ntFilter(q){
+  q=(q||"").trim().toLowerCase();
+  document.querySelectorAll("#ntPeople label").forEach(l=>{ l.hidden = !!q && !l.dataset.name.includes(q); });
+}
+
 async function saveTask(jid){
   if(!CAN.createJob()) return toast("Assistant Manager and above can assign tasks");
   if(jobClosed(jid)) return toast(job(jid).code+" is closed - reopen it before assigning tasks");
   const t=$("#ntTitle").value.trim();
   if(!t) return toast("Say what needs doing");
-  const who=$("#ntWho").value, due=$("#ntDue").value||TODAY, est=+$("#ntEst").value||1;
+  const whoList=ntPicked();
+  if(!whoList.length) return toast("Tick at least one person to assign the task to");
+  const due=$("#ntDue").value||TODAY, est=+$("#ntEst").value||1;
   const isPartner = person(me).role === "partner";
   const cost = isPartner && $("#ntCost") ? Math.max(0, +$("#ntCost").value||0) : 0;
   const effMonth = isPartner && $("#ntEffMonth") && $("#ntEffMonth").value ? $("#ntEffMonth").value : TODAY.slice(0,7);
-
-  const initialRespHistory = [{
-    id: "rh_"+Date.now()+"_"+Math.random().toString(36).slice(2,7),
-    assignedTo: who,
-    assignedBy: me,
-    fromDate: TODAY,
-    toDate: null,
-    createdAt: new Date().toISOString()
-  }];
 
   const initialCostHistory = cost > 0 ? [{
     effectiveMonth: effMonth,
@@ -6871,51 +7444,75 @@ async function saveTask(jid){
     updatedAt: new Date().toISOString()
   }] : [];
 
-  const insertPayload = {
-    organization_id: ORG_ID,
-    job_id: jid,
-    title: t,
-    assigned_to: who,
-    assigned_by: me,
-    status: "todo",
-    due_date: due,
-    estimated_hours: est,
-    monthly_cost: cost,
-    cost_history: initialCostHistory,
-    responsibility_history: initialRespHistory
-  };
+  // One task row per selected person (tasks.assigned_to holds one person), so
+  // each assignee has their own status, timesheet link and assignment email.
+  const rows = whoList.map(who => {
+    const respHistory = [{
+      id: "rh_"+Date.now()+"_"+Math.random().toString(36).slice(2,7),
+      assignedTo: who,
+      assignedBy: me,
+      fromDate: TODAY,
+      toDate: null,
+      createdAt: new Date().toISOString()
+    }];
+    return {
+      respHistory,
+      payload: {
+        organization_id: ORG_ID,
+        job_id: jid,
+        title: t,
+        assigned_to: who,
+        assigned_by: me,
+        status: "todo",
+        due_date: due,
+        estimated_hours: est,
+        monthly_cost: cost,
+        cost_history: initialCostHistory,
+        responsibility_history: respHistory
+      }
+    };
+  });
+  const payloads = rows.map(r => r.payload);
 
   // One save at a time: a second click while the first is in flight is ignored.
   const btn=$("#ntSave"); if(btn.disabled) return; btn.disabled=true;
-  let { data, error } = await supabase.from("tasks").insert(insertPayload).select().single();
+  // A single multi-row insert: either every person's task is saved or none is.
+  let { data, error } = await supabase.from("tasks").insert(payloads).select();
   if(error && (error.message.includes("monthly_cost") || error.message.includes("cost_history") || error.message.includes("responsibility_history") || error.message.includes("assigned_by"))){
-    delete insertPayload.monthly_cost;
-    delete insertPayload.cost_history;
-    delete insertPayload.responsibility_history;
-    delete insertPayload.assigned_by;
-    const retry = await supabase.from("tasks").insert(insertPayload).select().single();
+    payloads.forEach(p => {
+      delete p.monthly_cost;
+      delete p.cost_history;
+      delete p.responsibility_history;
+      delete p.assigned_by;
+    });
+    const retry = await supabase.from("tasks").insert(payloads).select();
     data = retry.data;
     error = retry.error;
   }
   btn.disabled=false;
   if(error) return toast("Could not add the task - "+error.message);
 
-  TASKS.push({
-    id: data.id,
-    job: jid,
-    title: t,
-    who,
-    assignedBy: me,
-    assignedById: me,
-    status: "todo",
-    due,
-    est,
-    monthlyCost: cost,
-    costHistory: initialCostHistory,
-    responsibilityHistory: initialRespHistory,
-    createdAt: data.created_at || new Date().toISOString()
+  (data||[]).forEach(row => {
+    const src = rows.find(r => r.payload.assigned_to === row.assigned_to);
+    TASKS.push({
+      id: row.id,
+      job: jid,
+      title: t,
+      who: row.assigned_to,
+      assignedBy: me,
+      assignedById: me,
+      status: "todo",
+      due,
+      est,
+      monthlyCost: cost,
+      costHistory: initialCostHistory,
+      responsibilityHistory: src ? src.respHistory : [],
+      createdAt: row.created_at || new Date().toISOString()
+    });
   });
-  closeModal(); toast("Task added"); render();
+  closeModal();
+  toast(whoList.length > 1 ? "Task added for "+whoList.length+" people" : "Task added");
+  render();
 }
 
 /* =====================  MY CALENDAR  ========================== */
@@ -8973,14 +9570,19 @@ function render(){
   $("#viewSub").textContent   = VIEWS[view].sub();
   $("#views").innerHTML = '<div class="view">'+VIEWS[view].render()+'</div>';
   if(view==="leave") makeCardsCollapsible($("#views .view"), LEAVE_OPEN_CARDS);
+  if(view==="approvals" && approvalsTab==="accepted") makeCardsCollapsible($("#views .view"), APPROVALS_OPEN_CARDS);
 }
 
 /* Leave page: every card collapses on its header; only "Leave balance" starts
    open. The open set lives here so a re-render (approve, apply, …) keeps what
    the user opened; go("leave") resets it. Pure presentation - the card HTML
    and its handlers are unchanged, the content is only wrapped. */
-const LEAVE_DEFAULT_OPEN = ["Leave balance"];
+const LEAVE_DEFAULT_OPEN = ["Leave balance", "Apply for leave"];
 let LEAVE_OPEN_CARDS = new Set(LEAVE_DEFAULT_OPEN);
+/* Approvals → Approved tab: same collapsible cards; Timesheets starts open.
+   go("approvals") resets it. */
+const APPROVALS_DEFAULT_OPEN = ["Timesheets"];
+let APPROVALS_OPEN_CARDS = new Set(APPROVALS_DEFAULT_OPEN);
 const CHEVRON_SVG = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">'+
   '<path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 function makeCardsCollapsible(root, openSet){
