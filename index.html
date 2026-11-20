@@ -6535,8 +6535,9 @@ function stampHTML(p){
    what was compared - not just the configured office coordinates, but the
    device coordinates actually returned and the resulting calculation.
    Collapsed by default so normal users see the plain-language result only. */
+const SHOW_PUNCH_DEBUG = false;   // employees never see coordinates/radius/distance internals
 function debugDetailsHTML(p){
-  if(!p.debug) return "";
+  if(!SHOW_PUNCH_DEBUG || !p.debug) return "";
   const d=p.debug;
   const site = d.site;
   return '<details class="tiny" style="margin-top:10px;font-family:var(--mono)">'+
@@ -6598,14 +6599,10 @@ async function recordPunch(type, siteId, lat, lng, accuracy){
   if(check.state==="invalid_location"||check.state==="invalid_site")
     return punchFailure(check.reason||"The selected office site has invalid location data. Contact an administrator.",debug);
   if(check.state!=="inside"){
-    const distance=dist===null?"unknown":fmtDistance(dist);
     const coarse=Number.isFinite(accuracy)&&accuracy>LOW_ACCURACY_WARN_M;
-    return punchFailure("You are outside the allowed location for "+site.label+". Current distance: "+
-      distance+". Allowed radius: "+site.radius+" m. Your device reported "+
-      Number(lat).toFixed(6)+", "+Number(lng).toFixed(6)+
-      (Number.isFinite(accuracy)?" (±"+fmtDistance(accuracy)+")":"")+"."+
-      (coarse?" That reading is very imprecise - it usually comes from your network/IP address, not GPS. "+
-        "Turn on precise location / Wi-Fi, disable any VPN, or punch from your phone.":""),debug);
+    return punchFailure("You are outside the allowed location for "+site.label+". Punch was not recorded."+
+      (coarse?" Your location could not be determined precisely - turn on precise location / Wi-Fi, "+
+        "disable any VPN, or punch from your phone.":""),debug);
   }
   ok=true; needsReview=false;
   resultMessage="You are within "+site.label+" ("+Math.round(dist)+" m of "+site.radius+" m).";
