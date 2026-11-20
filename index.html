@@ -301,7 +301,13 @@ th:last-child,td:last-child{padding-right:0}   /* keep a gap after right-aligned
 .code{font-size:12px;color:var(--ink-2)}
 .strong{font-weight:500}
 
-input[type=text],input[type=number],input[type=date],input[type=month],input[type=email],input[type=password],select,textarea{
+/* Search box and filter dropdowns side by side (Job codes, Work); they wrap only on phones. */
+.filter-row{display:flex;gap:14px;align-items:flex-end;flex-wrap:nowrap}
+.filter-row > .field{margin:0;flex:0 1 200px;min-width:0}
+.filter-row > .field.search-field{flex:0 1 280px}
+.filter-row > .btn{flex:none}
+@media (max-width:860px){ .filter-row{flex-wrap:wrap} .filter-row > .field,.filter-row > .field.search-field{flex:1 1 100%} }
+input[type=text],input[type=search],input[type=number],input[type=date],input[type=month],input[type=email],input[type=password],select,textarea{
   border:1px solid var(--rule);border-radius:var(--r);
   padding:5px 8px;background:var(--card);width:100%;font-size:13px;
 }
@@ -1706,14 +1712,12 @@ function jobCodeClash(code, scheduleId, exceptId){
   return ALL_JOBS.find(j=>j.id!==exceptId && j.code.trim().toUpperCase()===c &&
     !(scheduleId && j.scheduleId===scheduleId)) || null;
 }
-/* Job code as shown in pickers: the full client name first (codes alone are
-   hard to recognise), then the code; scheduled jobs share a code, so add the date. */
+/* Job code as shown in pickers: scheduled jobs share a code, so add the date. */
 /* Time can be booked only to a job you work on: one with a task assigned to
    you, one you are the Responsible Partner of, or a firm (non-chargeable)
    code such as FIRM/ADMIN, which everyone may use. */
 const canLogTimeTo = j => !!j && (j.overhead || j.partner===me || TASKS.some(t=>t.job===j.id && t.who===me));
-const jobClientName = j => (j && j.client && clientOf(j.client).name) || "";
-const jobPickLabel = j => (jobClientName(j) ? jobClientName(j)+" · " : "")+j.code+(isScheduled(j) && j.period ? " · "+j.period : "");
+const jobPickLabel = j => j.code+(isScheduled(j) && j.period ? " · "+j.period : "");
 
 function dueTag(d){
   const n=daysTo(d);
@@ -3085,7 +3089,7 @@ function quickHTML(locked, week=WEEK){
         const cls = g.status==="approved"?"approved":g.status==="queried"?"queried":g.status==="pending"?"pending":"";
         return '<div class="line '+cls+'"><div class="line-top">'+
           '<span class="code strong">'+esc(job(g.job).code)+'</span>'+
-          '<span class="tiny muted">'+(jobClientName(job(g.job))?esc(jobClientName(job(g.job)))+' · ':'')+esc(job(g.job).title)+'</span>'+
+          '<span class="tiny muted">'+esc(job(g.job).title)+'</span>'+
           (job(g.job).overhead?'<span class="tag">non-chargeable</span>':'')+
           '<span class="spacer" style="flex:1"></span>'+
           '<span class="num strong">'+hrs(g.hours)+'h</span>'+
@@ -4803,7 +4807,7 @@ let jobsSearch = "";
 const searchNorm = s => (s||"").toString().toLowerCase();
 const searchHit = (q, ...fields) => !q || fields.some(f => searchNorm(f).includes(q));
 function searchBoxHTML(id, value, placeholder, setter){
-  return '<label class="field" style="margin:0;flex:1 1 240px;min-width:200px"><span class="tiny muted">Search</span>'+
+  return '<label class="field search-field"><span class="tiny muted">Search</span>'+
     '<input type="search" id="'+id+'" value="'+esc(value)+'" placeholder="'+esc(placeholder)+'"'+
     ' autocomplete="off" oninput="'+setter+'(this)"></label>';
 }
@@ -4884,27 +4888,27 @@ VIEWS.work = {
     let h = '<div class="card"><div class="card-head"><h2>All work</h2><span class="spacer"></span>'+
       (CAN.createJob()?'<button class="btn ghost sm" onclick="newJob()">New job code</button>':'')+
       '</div>'+
-      '<div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;margin-top:8px;padding-top:10px;border-top:1px solid var(--rule-2)">'+
+      '<div class="filter-row" style="margin-top:8px;padding-top:10px;border-top:1px solid var(--rule-2)">'+
         searchBoxHTML("workSearch", workSearch, "Job code, client, task or person", "setWorkSearch")+
-        '<label class="field" style="margin:0;min-width:170px"><span class="tiny muted">Assigned by</span>'+
+        '<label class="field"><span class="tiny muted">Assigned by</span>'+
           '<select id="workFilterBy" onchange="setWorkFilter(\'by\',this.value)">'+
             '<option value="all"'+(workFilterAssignedBy==="all"?" selected":"")+'>All</option>'+
             assignerOptions+
           '</select></label>'+
-        '<label class="field" style="margin:0;min-width:170px"><span class="tiny muted">Assigned to</span>'+
+        '<label class="field"><span class="tiny muted">Assigned to</span>'+
           '<select id="workFilterTo" onchange="setWorkFilter(\'to\',this.value)">'+
             '<option value="all"'+(workFilterAssignedTo==="all"?" selected":"")+'>All</option>'+
             assigneeOptions+
           '</select></label>'+
-        '<label class="field" style="margin:0;min-width:150px"><span class="tiny muted">Due date</span>'+
+        '<label class="field"><span class="tiny muted">Due date</span>'+
           '<select id="workFilterDue" onchange="setWorkFilter(\'due\',this.value)">'+
             [["all","All"],["today","Today"],["tomorrow","Tomorrow"],["week","This week"],["overdue","Overdue"],["custom","Custom date / range"]]
               .map(([v,l])=>'<option value="'+v+'"'+(workFilterDue===v?" selected":"")+'>'+l+'</option>').join("")+
           '</select></label>'+
         (workFilterDue==="custom" ?
-          '<label class="field" style="margin:0;min-width:140px"><span class="tiny muted">Due from</span>'+
+          '<label class="field"><span class="tiny muted">Due from</span>'+
             '<input type="date" id="workFilterDueFrom" value="'+esc(workFilterDueFrom)+'" onchange="setWorkFilter(\'dueFrom\',this.value)"></label>'+
-          '<label class="field" style="margin:0;min-width:140px"><span class="tiny muted">Due to</span>'+
+          '<label class="field"><span class="tiny muted">Due to</span>'+
             '<input type="date" id="workFilterDueTo" value="'+esc(workFilterDueTo)+'" onchange="setWorkFilter(\'dueTo\',this.value)"></label>' : '')+
         ((workFilterAssignedBy!=="all" || workFilterAssignedTo!=="all" || workFilterDue!=="all" || workSearch.trim()) ?
           '<button class="btn ghost sm" style="margin-bottom:2px" onclick="resetWorkFilters()">Reset filters</button>' : '')+
@@ -5026,7 +5030,7 @@ function jobsPartnerFilterHTML(){
   const list = [...ids].map(id=>({ id, name:partnerName(id) })).filter(p=>p.name).sort((a,b)=>a.name.localeCompare(b.name));
   if(!list.length) return '';
   const opt = (v, label) => '<option value="'+v+'"'+(jobsPartnerFilter===v?" selected":"")+'>'+esc(label)+'</option>';
-  return '<label class="field" style="margin:0;min-width:200px"><span>Responsible partner</span>'+
+  return '<label class="field"><span class="tiny muted">Responsible partner</span>'+
     '<select onchange="setJobsPartnerFilter(this.value)">'+opt("all","All partners")+
     list.map(p=>opt(p.id, p.name+(p.id===me?" (you)":""))).join("")+
     (JOBS.some(j=>!j.overhead && !j.partner) ? opt("none","Not set") : '')+'</select></label>';
@@ -5040,7 +5044,7 @@ VIEWS.jobs = {
         ? '<button class="btn" onclick="newJob()">New job code</button>'
         : '<span class="tiny muted">Assistant Manager and above can raise a job code.</span>')+
       '</div>'+
-      '<div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap">'+
+      '<div class="filter-row">'+
         searchBoxHTML("jobsSearch", jobsSearch, "Job code, title, client, period or partner", "setJobsSearch")+
         jobsPartnerFilterHTML()+
         (jobsSearch.trim() ? '<button class="btn ghost sm" style="margin-bottom:2px" onclick="jobsSearch=\'\';render()">Clear search</button>' : '')+
