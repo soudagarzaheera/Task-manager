@@ -2807,11 +2807,11 @@ const VIEWS = {};
    The action comes from today's punch rows as stored in attendance_punches
    (loaded at sign-in for TODAY and appended after each successful insert), so
    a refresh, restart or another device gives the same answer:
-     no punch-in            -> Not marked yet · button punches IN
-     punch-in, no punch-out -> Punched In     · same button punches OUT
+     no punch-in            -> Not marked yet · button opens Attendance to punch IN
+     punch-in, no punch-out -> Punched In     · same button opens Attendance to punch OUT
      punch-in and punch-out -> Present        · no button for the rest of the day
-   The button runs the same doPunch() as the Attendance page - same GPS fix,
-   geofence check, Other Place flow, database insert and error messages. */
+   The button only navigates (markAttendance -> go("attendance")); the punch
+   itself is made from the Attendance page. */
 const myPunchState = last => !last ? "in" : last.type==="in" ? "out" : "done";
 const MARK_ATTENDANCE = "Mark attendance";
 
@@ -2833,22 +2833,24 @@ function todayAttendanceHTML(last){
     return '<p class="tiny" style="margin:10px 0 12px"><span class="tag warn">Punched In</span> since <span class="num strong">'+
       esc(inP ? inP.time : last.time)+'</span></p>'+button;
 
-  if(isSunday(TODAY)) return '<p class="muted tiny" style="margin:10px 0 12px"><span class="tag info">Holiday</span> Sunday - no attendance needed.</p>';
-  if(optional) return '<p class="muted tiny" style="margin:10px 0 12px"><span class="tag info">'+(publicHolidayOn(TODAY) ? 'Holiday' : 'Saturday')+'</span> '+
-      (publicHolidayOn(TODAY) ? esc(publicHolidayOn(TODAY).name) : 'Saturday')+
-      ' - no attendance needed. Working today? Punch in and out to be marked Present and earn 1 Earned Leave.</p>'+button;
+  // Sundays, Saturdays and public holidays: no remark. Sunday shows nothing;
+  // on an optional work day only the button shows, for anyone who works.
+  if(isSunday(TODAY)) return '';
+  if(optional) return '<div style="margin-top:10px">'+button+'</div>';
   return '<p class="muted tiny" style="margin:10px 0 12px">Not marked yet.</p>'+button;
 }
 
-/* Punch in or out - whichever today's record calls for. A punch needs a
-   place to check against: the site already chosen this session, else (for
-   Punch Out) the site or Other Place used to punch in, else the only active
-   site; otherwise the employee picks one in a small dialog first. */
+/* Today is only an entry point: "Mark attendance" opens the Attendance page
+   for both Punch In and Punch Out - it never records a punch itself. The
+   punch (GPS fix, geofence, Other Place flow, database insert) happens only
+   from the Attendance page's own button. To save a step, the office site
+   is pre-selected where it is obvious: the site already chosen this
+   session, else (for Punch Out) the site or Other Place used to punch in,
+   else the only active site. The employee can still change it there. */
 function markAttendance(){
   const state = myPunchState(punches[punches.length-1]);
-  if(state==="done") return render();
   const validSite = id => id===OTHER_PLACE || PUNCH_SITES.some(s=>s.id===id && s.active);
-  if(!validSite(selectedPunchSiteId)){
+  if(state!=="done" && !validSite(selectedPunchSiteId)){
     const inP = punches.find(p=>p.type==="in");
     const active = PUNCH_SITES.filter(s=>s.active);
     selectedPunchSiteId =
@@ -2856,26 +2858,7 @@ function markAttendance(){
       state==="out" && inP && validSite(inP.locationId) ? inP.locationId :
       active.length===1 ? active[0].id : "";
   }
-  if(!selectedPunchSiteId) return markAttendanceSiteModal(state);
-  doPunch(state);
-}
-function markAttendanceSiteModal(state){
-  modal('<h3>'+MARK_ATTENDANCE+'</h3>'+
-    '<p class="tiny muted" style="margin-bottom:12px">Where are you? Your location is checked against this site'+(state==="out"?' for your punch out.':'.')+'</p>'+
-    '<label class="field"><span>Office site</span><select id="maSite">'+
-      '<option value="">Select Office Site</option>'+
-      PUNCH_SITES.filter(s=>s.active).map(s=>'<option value="'+s.id+'">'+esc(s.label)+'</option>').join("")+
-      '<option value="'+OTHER_PLACE+'">Other Place (client visit, official work)</option>'+
-    '</select></label>'+
-    '<div class="row"><button class="btn ghost" onclick="closeModal()">Cancel</button>'+
-    '<button class="btn" onclick="markAttendanceWithSite()">Continue</button></div>');
-}
-function markAttendanceWithSite(){
-  const id = ($("#maSite")||{}).value || "";
-  if(!id) return toast("Select where you are");
-  closeModal();
-  setPunchSite(id);          // validates the choice and re-renders Today
-  if(selectedPunchSiteId) markAttendance();
+  go("attendance");
 }
 
 VIEWS.today = {
@@ -4494,9 +4477,6 @@ VIEWS.attendance = {
     let h = '<div class="grid g2 card-row">'+
       '<div class="card"><div class="card-head"><h2>Mark attendance</h2></div>'+
       '<p class="tiny muted" style="margin-bottom:14px">Your browser will ask for location.</p>'+
-      (isOptionalWorkDay(TODAY) ? '<p class="tiny" style="margin-bottom:14px"><span class="tag info">'+(publicHolidayOn(TODAY) ? 'Holiday' : saturdayLabel(TODAY))+'</span> '+
-        (publicHolidayOn(TODAY) ? esc(publicHolidayOn(TODAY).name) : saturdayLabel(TODAY))+
-        ': no attendance needed. If you work, punch in and out - you are marked Present and earn 1 Earned Leave.</p>' : '')+
       '<label class="field"><span>Office site</span><select id="punchSite" onchange="setPunchSite(this.value)">'+ 
       '<option value="">Select Office Site</option>'+PUNCH_SITES.map(s=>'<option value="'+s.id+'"'+(s.id===selectedPunchSiteId?' selected':'')+'>'+esc(s.label)+'</option>').join("")+
       '<option value="'+OTHER_PLACE+'"'+(otherSelected?' selected':'')+'>Other Place (client visit, official work)</option>'+
